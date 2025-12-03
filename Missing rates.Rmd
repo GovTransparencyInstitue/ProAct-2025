@@ -1,0 +1,306 @@
+---
+title: "ProACT Data Overview"
+author: "Ivana Rudinac"
+output: html_notebook
+---
+
+
+```{r}
+
+library(data.table)    
+library(dplyr)         
+library(stringr)       
+library(purrr)         
+library(openxlsx)     
+library(tidyr)
+library(readr)         
+library(janitor)      
+
+
+
+```
+
+
+```{r}
+
+path <- "C:/00 GTI work/ProACT/all datasets"
+
+files <- list.files(path, pattern = "\\.csv$", full.names = TRUE)
+
+datasets <- lapply(files, function(f) {
+  fread(
+    f,
+    keepLeadingZeros = TRUE,
+    encoding = "UTF-8",
+    stringsAsFactors = FALSE,
+    showProgress = TRUE,
+    na.strings = c("", "-", "NA")
+  )
+})
+
+names(datasets) <- gsub(".csv$", "", basename(files))
+
+
+
+```
+
+
+## General
+
+```{r}
+
+count_unique <- function(df, col) {
+  if (col %in% names(df)) {
+    length(unique(df[[col]][!is.na(df[[col]])]))
+  } else {
+    NA_integer_
+  }
+}
+
+count_true <- function(df, col) {
+  if (col %in% names(df)) {
+    sum(df[[col]] == 1, na.rm = TRUE)
+  } else {
+    NA_integer_
+  }
+}
+
+compute_stats <- function(df) {
+  tibble(
+    n_rows              = nrow(df),
+    n_unique_tender_id  = count_unique(df, "tender_id"),
+    n_unique_buyer_id   = count_unique(df, "buyer_id"),
+    n_unique_bidder_id  = count_unique(df, "bidder_id"),
+    n_winning_bids      = count_true(df, "bid_iswinning")
+  )
+}
+
+stats_df <- map_dfr(
+  datasets,
+  compute_stats,
+  .id = "country"
+)
+
+write.csv(
+  stats_df,
+  "C:/00 GTI work/ProACT/country_summary_stats.csv",
+  row.names = FALSE
+)
+
+stats_df
+
+
+
+```
+
+
+##Variable list per country
+
+```{r}
+
+wb <- createWorkbook()
+
+for (nm in names(datasets)) {
+  
+  df_raw <- datasets[[nm]]
+  
+  vars <- names(df_raw)
+  
+  types <- sapply(df_raw, function(x) class(x)[1])
+  
+  example <- sapply(df_raw, function(x) {
+    val <- x[!is.na(x)][1]
+    if (is.null(val)) return(NA)
+    as.character(val)
+  })
+  
+  df <- data.frame(
+    variable = vars,
+    type = types,
+    example_entry = example,
+    stringsAsFactors = FALSE
+  )
+  
+  addWorksheet(wb, sheetName = nm)
+  writeData(wb, nm, df)
+}
+
+saveWorkbook(
+  wb,
+  "C:/00 GTI work/ProACT/variable_lists_by_country.xlsx",
+  overwrite = TRUE
+)
+
+```
+
+
+
+## Missing rates
+
+
+```{r}
+
+target_vars <- c(
+  "source",
+  "tender_country",
+  "tender_proceduretype",
+  "buyer_id", "buyer_masterid",
+  "buyer_name",
+  "buyer_country",
+  "buyer_buyertype",
+  "buyer_mainactivities",
+  "bidder_masterid", "bidder_id",
+  "bidder_name",
+  "bidder_country",
+  "tender_publications_firstcallfortenderdate",
+  "notice_url",
+  "tender_biddeadline",
+  "tender_awarddecisiondate",
+  "lot_productcode", "lot_localproductcode_type", "lot_localproductcode",
+  "buyer_nuts", "buyer_city", "buyer_postcode",
+  "tender_addressofimplementation_nuts", "tender_addressofimplementation_country",
+  "bidder_nuts",
+  "bid_price", "bid_priceusd",
+  "lot_number",
+  "lot_title",
+  "tender_publications_firstdcontractawarddate",
+  "tender_contractsignaturedate",
+  "tender_supplytype",
+  "tender_id",
+  "bid_number",
+  "buyer_country",                   
+  "lot_estimatedpriceusd", "lot_estimatedprice",
+  "lot_estimatedpricecurrency",
+  "bid_price",                     
+  "bid_pricecurrency",
+  "bid_iswinning"
+)
+
+
+
+calc_missing_vector <- function(df, vars) {
+  
+  n_total <- nrow(df)
+  
+  sapply(vars, function(v) {
+    
+    if (!v %in% names(df)) {
+      return("Not present")
+    }
+    
+    rate <- mean(is.na(df[[v]]))   
+    percent <- round(rate * 100, 1)
+    
+    # formatting
+    if (percent == 0)   return("0%")
+    if (percent == 100) return("100%")
+    
+    return(paste0(percent, "%"))
+  })
+}
+
+
+
+
+missing_list <- map(datasets, ~ calc_missing_vector(.x, target_vars))
+
+missing_df <- bind_rows(missing_list, .id = "country")
+
+
+
+missing_df
+
+
+
+
+
+```
+
+
+```{r}
+
+
+wb <- createWorkbook()
+
+addWorksheet(wb, "missing_rates")
+
+writeData(wb, "missing_rates", missing_df)
+
+saveWorkbook(
+  wb,
+  "C:/00 GTI work/ProACT/missing_rates.xlsx",
+  overwrite = TRUE
+)
+
+
+
+```
+
+
+# Year
+
+```{r}
+
+get_year_range <- function(df) {
+  if (!"tender_awarddecisiondate" %in% names(df)) {
+    return(data.frame(min_year = NA, max_year = NA))
+  }
+  
+  dates <- as.Date(df$tender_awarddecisiondate,
+                   tryFormats = c("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"))
+  
+  years <- as.numeric(format(dates, "%Y"))
+  years <- years[!is.na(years)]
+  
+  if (length(years) == 0) return(data.frame(min_year = NA, max_year = NA))
+  
+  data.frame(min_year = min(years), max_year = max(years))
+}
+
+year_coverage <- purrr::map_dfr(datasets, get_year_range, .id = "country")
+
+
+write.csv(
+  year_coverage,
+  "C:/00 GTI work/ProACT/awarddecisiondate.csv",
+  row.names = FALSE
+)
+
+
+
+```
+
+
+
+```{r}
+
+get_year_range_firstdcontract <- function(df) {
+  if (!"tender_publications_firstdcontractawarddate" %in% names(df)) {
+    return(data.frame(min_year = NA, max_year = NA))
+  }
+  
+  dates <- as.Date(df$tender_publications_firstdcontractawarddate,
+                   tryFormats = c("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"))
+  
+  years <- as.numeric(format(dates, "%Y"))
+  years <- years[!is.na(years)]
+  
+  if (length(years) == 0) return(data.frame(min_year = NA, max_year = NA))
+  
+  data.frame(min_year = min(years), max_year = max(years))
+}
+
+year_coverage_firstdcontract <- purrr::map_dfr(
+  datasets,
+  get_year_range_firstdcontract,
+  .id = "country"
+)
+
+write.csv(
+  year_coverage_firstdcontract,
+  "C:/00 GTI work/ProACT/year_coverage_firstdcontract.csv",
+  row.names = FALSE
+)
+
+```
+
