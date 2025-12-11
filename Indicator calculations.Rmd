@@ -1,0 +1,631 @@
+---
+title: "Indicator calculations"
+output: html_notebook
+---
+
+
+```{r}
+
+setwd("/var/tmp/ivana")
+
+```
+
+```{r}
+
+library(data.table)    
+library(dplyr)         
+library(stringr)       
+library(purrr)         
+library(tidyr)
+library(readr)         
+library(janitor)   
+
+
+```
+
+
+```{r}
+
+files <- list.files(pattern = "\\.csv$", full.names = TRUE)
+
+datasets <- lapply(files, function(f) {
+  fread(
+    f,
+    keepLeadingZeros = TRUE,
+    encoding = "UTF-8",
+    stringsAsFactors = FALSE,
+    showProgress = TRUE,
+    na.strings = c("", "-", "NA")
+  )
+})
+
+names(datasets) <- sub("\\.csv$", "", basename(files))
+
+```
+
+# Austria: test
+
+```{r}
+
+dt <- datasets[["AT_export"]]
+
+```
+
+
+## Transparency group
+
+```{r}
+
+# 1 if non-missing and non-empty string, otherwise 0
+present01 <- function(x) {
+  as.integer(!is.na(x) & x != "")
+}
+
+
+```
+
+
+### Sample restriction: All awarded contracts
+
+```{r}
+
+## Procedure type
+# 1 = procedure type present
+dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
+
+## Buyer ID
+# 1 = buyer ID present
+dt[, ind_tr_buyer_id       := present01(buyer_id)]
+
+## Supplier ID
+# 1 = supplier ID present
+dt[, ind_tr_supplier_id    := present01(bidder_id)]
+
+## Award notice publication date
+# 1 = Award notice publication date present
+dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
+
+# Buyer location: city OR postcode OR NUTS 
+# 1 = Buyer location present (city OR postcode OR NUTS code)
+dt[, ind_tr_buyer_loc :=
+      fifelse(
+        (!is.na(buyer_city)     & buyer_city     != "") |
+        (!is.na(buyer_postcode) & buyer_postcode != "") |
+        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
+        1L, 0L
+      )]
+
+# Supplier location
+dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
+                                    as.integer(bidder_nuts != ""))]
+
+
+
+## Implementation location
+# 1 = Implementation location present
+dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
+
+
+## Contract value
+# 1 = Contract value present
+dt[, ind_tr_contract_value      := present01(bid_priceusd)]
+
+
+
+```
+
+
+### Sample restriction: Only competitive purchases (open and restricted)
+
+```{r}
+
+dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
+
+# Call for tenders publication date (Integrity red flag)
+# 1 = Call for tenders date present (only competitive tenders)
+dt[, ind_tr_call_pub := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
+]
+
+# Bids submission deadline date
+# 1 = Bid submission deadline date present (only competitive tenders)
+dt[, ind_tr_bid_deadline := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
+]
+
+# Bids opening date
+# 1 = Notice URL present (only competitive tenders)
+dt[, ind_tr_bid_opening := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_bid_opening :=
+     as.integer(
+       present01(notice_url)
+     )]
+
+```
+
+
+### Product code
+
+```{r}
+
+# Product code
+# 1 = Valid lot product code
+# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
+dt[, ind_tr_prod_code := as.integer(
+  !is.na(lot_productcode) &
+  lot_productcode != "" &
+  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
+)]
+
+```
+
+
+## Openness group
+
+```{r}
+
+# Open procedure share
+# 1 = Award was made through open procedure
+dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
+
+# Non-open procedure share
+# 1 = Award was made through a non-open procedure
+nonopen_methods <- c(
+  "NEGOTIATED",
+  "NEGOTIATED_WITH_PUBLICATION",
+  "NEGOTIATED_WITHOUT_PUBLICATION",
+  "OUTRIGHT_AWARD",
+  "APPROACHING_BIDDERS"
+)
+
+dt[, ind_op_nonopen_proc :=
+      fifelse(is.na(tender_proceduretype), NA_integer_,
+      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
+
+```
+
+
+```{r}
+
+# Advertisement period in days (only in competitive tenders)
+dt[, ind_op_adv_period := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_op_adv_period :=
+     as.integer(
+       as.numeric(
+         tender_biddeadline - tender_publications_firstcallfortenderdate,
+         units = "days"
+       )
+     )]
+
+## Removing implausible values
+dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
+   ind_op_adv_period := NA_integer_]
+
+
+# Short advertisement period flag
+# 1 = adv period < 15 days 
+dt[, ind_op_short_adv_flag := NA_integer_]
+
+dt[, adv_period :=
+     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
+                units = "days")]
+
+dt[competitive == 1 &
+     adv_period >= 0 & adv_period <= 1095,
+   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
+
+dt[, adv_period := NULL]
+
+
+
+
+```
+
+
+
+```{r}
+
+fwrite(dt, "/var/tmp/ivana/Export1/AT_export.csv")
+
+
+```
+
+
+# Belgium: test
+
+```{r}
+
+dt <- datasets[["BE_export"]]
+
+```
+
+
+## Transparency group
+
+```{r}
+
+# 1 if non-missing and non-empty string, otherwise 0
+present01 <- function(x) {
+  as.integer(!is.na(x) & x != "")
+}
+
+
+```
+
+
+### Sample restriction: All awarded contracts
+
+```{r}
+
+## Procedure type
+# 1 = procedure type present
+dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
+
+## Buyer ID
+# 1 = buyer ID present
+dt[, ind_tr_buyer_id       := present01(buyer_id)]
+
+## Supplier ID
+# 1 = supplier ID present
+dt[, ind_tr_supplier_id    := present01(bidder_id)]
+
+## Award notice publication date
+# 1 = Award notice publication date present
+dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
+
+# Buyer location: city OR postcode OR NUTS 
+# 1 = Buyer location present (city OR postcode OR NUTS code)
+dt[, ind_tr_buyer_loc :=
+      fifelse(
+        (!is.na(buyer_city)     & buyer_city     != "") |
+        (!is.na(buyer_postcode) & buyer_postcode != "") |
+        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
+        1L, 0L
+      )]
+
+# Supplier location
+dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
+                                    as.integer(bidder_nuts != ""))]
+
+
+
+## Implementation location
+# 1 = Implementation location present
+dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
+
+
+## Contract value
+# 1 = Contract value present
+dt[, ind_tr_contract_value      := present01(bid_priceusd)]
+
+
+
+```
+
+
+### Sample restriction: Only competitive purchases (open and restricted)
+
+```{r}
+
+dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
+
+# Call for tenders publication date (Integrity red flag)
+# 1 = Call for tenders date present (only competitive tenders)
+dt[, ind_tr_call_pub := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
+]
+
+# Bids submission deadline date
+# 1 = Bid submission deadline date present (only competitive tenders)
+dt[, ind_tr_bid_deadline := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
+]
+
+# Bids opening date
+# 1 = Notice URL present (only competitive tenders)
+dt[, ind_tr_bid_opening := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_bid_opening :=
+     as.integer(
+       present01(notice_url)
+     )]
+
+```
+
+
+### Product code
+
+```{r}
+
+# Product code
+# 1 = Valid lot product code
+# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
+dt[, ind_tr_prod_code := as.integer(
+  !is.na(lot_productcode) &
+  lot_productcode != "" &
+  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
+)]
+
+```
+
+
+## Openness group
+
+```{r}
+
+# Open procedure share
+# 1 = Award was made through open procedure
+dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
+
+# Non-open procedure share
+# 1 = Award was made through a non-open procedure
+nonopen_methods <- c(
+  "NEGOTIATED",
+  "NEGOTIATED_WITH_PUBLICATION",
+  "NEGOTIATED_WITHOUT_PUBLICATION",
+  "OUTRIGHT_AWARD",
+  "APPROACHING_BIDDERS"
+)
+
+dt[, ind_op_nonopen_proc :=
+      fifelse(is.na(tender_proceduretype), NA_integer_,
+      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
+
+```
+
+
+```{r}
+
+# Advertisement period in days (only in competitive tenders)
+dt[, ind_op_adv_period := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_op_adv_period :=
+     as.integer(
+       as.numeric(
+         tender_biddeadline - tender_publications_firstcallfortenderdate,
+         units = "days"
+       )
+     )]
+
+## Removing implausible values
+dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
+   ind_op_adv_period := NA_integer_]
+
+
+# Short advertisement period flag
+# 1 = adv period < 15 days 
+dt[, ind_op_short_adv_flag := NA_integer_]
+
+dt[, adv_period :=
+     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
+                units = "days")]
+
+dt[competitive == 1 &
+     adv_period >= 0 & adv_period <= 1095,
+   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
+
+dt[, adv_period := NULL]
+
+
+
+
+```
+
+
+
+```{r}
+
+fwrite(dt, "/var/tmp/ivana/Export1/BE_export.csv")
+
+
+```
+
+# Czech Republic: test
+
+```{r}
+
+dt <- datasets[["CZ_export"]]
+
+```
+
+
+## Transparency group
+
+```{r}
+
+# 1 if non-missing and non-empty string, otherwise 0
+present01 <- function(x) {
+  as.integer(!is.na(x) & x != "")
+}
+
+
+```
+
+
+### Sample restriction: All awarded contracts
+
+```{r}
+
+## Procedure type
+# 1 = procedure type present
+dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
+
+## Buyer ID
+# 1 = buyer ID present
+dt[, ind_tr_buyer_id       := present01(buyer_id)]
+
+## Supplier ID
+# 1 = supplier ID present
+dt[, ind_tr_supplier_id    := present01(bidder_id)]
+
+## Award notice publication date
+# 1 = Award notice publication date present
+dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
+
+# Buyer location: city OR postcode OR NUTS 
+# 1 = Buyer location present (city OR postcode OR NUTS code)
+dt[, ind_tr_buyer_loc :=
+      fifelse(
+        (!is.na(buyer_city)     & buyer_city     != "") |
+        (!is.na(buyer_postcode) & buyer_postcode != "") |
+        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
+        1L, 0L
+      )]
+
+# Supplier location
+dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
+                                    as.integer(bidder_nuts != ""))]
+
+
+
+## Implementation location
+# 1 = Implementation location present
+dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
+
+
+## Contract value
+# 1 = Contract value present
+dt[, ind_tr_contract_value      := present01(bid_priceusd)]
+
+
+
+```
+
+
+### Sample restriction: Only competitive purchases (open and restricted)
+
+```{r}
+
+dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
+
+# Call for tenders publication date (Integrity red flag)
+# 1 = Call for tenders date present (only competitive tenders)
+dt[, ind_tr_call_pub := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
+]
+
+# Bids submission deadline date
+# 1 = Bid submission deadline date present (only competitive tenders)
+dt[, ind_tr_bid_deadline := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
+]
+
+# Bids opening date
+# 1 = Notice URL present (only competitive tenders)
+dt[, ind_tr_bid_opening := NA_integer_]
+dt[competitive == TRUE,
+   ind_tr_bid_opening :=
+     as.integer(
+       present01(notice_url)
+     )]
+
+```
+
+
+### Product code
+
+```{r}
+
+# Product code
+# 1 = Valid lot product code
+# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
+dt[, ind_tr_prod_code := as.integer(
+  !is.na(lot_productcode) &
+  lot_productcode != "" &
+  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
+)]
+
+```
+
+
+## Openness group
+
+```{r}
+
+# Open procedure share
+# 1 = Award was made through open procedure
+dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
+
+# Non-open procedure share
+# 1 = Award was made through a non-open procedure
+nonopen_methods <- c(
+  "NEGOTIATED",
+  "NEGOTIATED_WITH_PUBLICATION",
+  "NEGOTIATED_WITHOUT_PUBLICATION",
+  "OUTRIGHT_AWARD",
+  "APPROACHING_BIDDERS"
+)
+
+dt[, ind_op_nonopen_proc :=
+      fifelse(is.na(tender_proceduretype), NA_integer_,
+      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
+
+```
+
+
+```{r}
+
+# Advertisement period in days (only in competitive tenders)
+dt[, ind_op_adv_period := NA_integer_]
+
+dt[competitive == TRUE,
+   ind_op_adv_period :=
+     as.integer(
+       as.numeric(
+         tender_biddeadline - tender_publications_firstcallfortenderdate,
+         units = "days"
+       )
+     )]
+
+## Removing implausible values
+dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
+   ind_op_adv_period := NA_integer_]
+
+
+# Short advertisement period flag
+# 1 = adv period < 15 days 
+dt[, ind_op_short_adv_flag := NA_integer_]
+
+dt[, adv_period :=
+     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
+                units = "days")]
+
+dt[competitive == 1 &
+     adv_period >= 0 & adv_period <= 1095,
+   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
+
+dt[, adv_period := NULL]
+
+
+
+
+```
+
+
+
+```{r}
+
+fwrite(dt, "/var/tmp/ivana/Export1/CZ_export.csv")
+
+
+```
+
+
+
+
+
+
+
