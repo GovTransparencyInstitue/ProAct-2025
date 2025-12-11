@@ -9,12 +9,17 @@ suppressPackageStartupMessages({
   library(tidyverse)
   library(lubridate)
   library(data.table)
+  library(readxl)
 })
 
 # Load ISO matcher for ISO3 codes
 # iso_matcher <- fread("/gti/tmp/_UNDP/Utility_datasets/Other/ISO_matcher.csv") # Server PATH
 iso_matcher <- fread("C:/GTI/TMP/ISO_matcher.csv") # Dani local path
 setnames(iso_matcher, tolower(names(iso_matcher)))
+
+# Load correspondence table for product market matching
+correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels")
+correspondence_table <- as.data.table(correspondence_table)
 
 # ---------- CLI ----------
 opt_list <- list(
@@ -38,50 +43,79 @@ out_dir <- file.path(opt$`output-dir`, opt$`output-subdir`)
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 vcat("Output: %s", out_dir)
 
-# ---------- Updated indicators list ----------
-list_of_indicators <- c(
-  "ind_tr_proc_type",
-  "ind_tr_buyer_id",
-  "ind_tr_supplier_id",
-  "ind_tr_bidder_id",
-  "ind_tr_call_pub",
-  "ind_tr_bid_deadline",
-  "ind_tr_bid_opening",
-  "ind_tr_award_pub",
-  "ind_tr_prod_code",
-  "ind_tr_buyer_loc",
-  "ind_tr_supplier_loc",
-  "ind_tr_impl_loc",
-  "ind_tr_bidder_loc",
-  "ind_tr_contract_value",
-  "ind_tr_benford",
-  "ind_op_open_proc",
-  "ind_op_nonopen_proc",
-  "ind_op_adv_period",
-  "ind_op_short_adv_flag",
-  "ind_adm_dec_period",
-  "ind_adm_long_dec_flag",
-  "ind_comp_avg_bids",
-  "ind_comp_single_bid",
-  "ind_comp_new_suppliers",
-  "ind_comp_sector_concentration",
-  "ind_comp_foreign_suppliers",
-  "ind_comp_tax_haven_suppliers",
-  "ind_econ_sector_composition",
-  "ind_econ_buyer_concentration",
-  "ind_impl_cost_overrun",
-  "ind_impl_time_overrun"
+# ---------- Indicators lists ----------
+# New indicators list (for future use)
+# list_of_indicators_new <- c(
+#   "ind_tr_proc_type",
+#   "ind_tr_buyer_id",
+#   "ind_tr_supplier_id",
+#   "ind_tr_bidder_id",
+#   "ind_tr_call_pub",
+#   "ind_tr_bid_deadline",
+#   "ind_tr_bid_opening",
+#   "ind_tr_award_pub",
+#   "ind_tr_prod_code",
+#   "ind_tr_buyer_loc",
+#   "ind_tr_supplier_loc",
+#   "ind_tr_impl_loc",
+#   "ind_tr_bidder_loc",
+#   "ind_tr_contract_value",
+#   "ind_tr_benford",
+#   "ind_op_open_proc",
+#   "ind_op_nonopen_proc",
+#   "ind_op_adv_period",
+#   "ind_op_short_adv_flag",
+#   "ind_adm_dec_period",
+#   "ind_adm_long_dec_flag",
+#   "ind_comp_avg_bids",
+#   "ind_comp_single_bid",
+#   "ind_comp_new_suppliers",
+#   "ind_comp_sector_concentration",
+#   "ind_comp_foreign_suppliers",
+#   "ind_comp_tax_haven_suppliers",
+#   "ind_econ_sector_composition",
+#   "ind_econ_buyer_concentration",
+#   "ind_impl_cost_overrun",
+#   "ind_impl_time_overrun"
+# )
+
+# Old indicators list (currently in use)
+list_of_indicators_old <- c(
+  "ind_corr_nocft",
+  "ind_corr_singleb",
+  "ind_corr_taxhaven",
+  "ind_corr_dec_period",
+  "ind_corr_nonopen_proc_method",
+  "ind_corr_subm_period",
+  "ind_corr_benfords",
+  "ind_winner_share",
+  "ind_tr_buyer_name_missing",
+  "ind_tr_title_missing",
+  "ind_tr_bidder_name_missing",
+  "ind_tr_tender_supplytype_missing",
+  "ind_tr_bid_price_missing",
+  "ind_tr_impl_loc_missing",
+  "ind_tr_proc__method_missing",
+  "ind_tr_bids_nr_missing",
+  "ind_tr_aw_date_missing",
+  "ind_comp_bidder_mkt_share",
+  "ind_comp_bids_count",
+  "ind_comp_bidder_mkt_entry",
+  "ind_comp_bidder_non_local"
 )
+
+# Set active indicators list
+list_of_indicators <- list_of_indicators_old
 
 ## ProACT Dashboard Export Function ####
 
 # Modified function to calculate aggregate values with HIGH/MED/LOW tiers
 calculate_proact_aggregates <- function(dt, indicator) {
-  # Ensure dt is a data.table and sort in descending order by bid_price
+  # Ensure dt is a data.table and sort in descending order by bid_priceusd
   if (!is.data.table(dt)) {
     dt <- as.data.table(dt)
   }
-  setorder(dt, -bid_price)
+  setorder(dt, -bid_priceusd)
 
   # Helper function to calculate statistics for a subset
   calc_stats <- function(subset_dt) {
@@ -100,18 +134,18 @@ calculate_proact_aggregates <- function(dt, indicator) {
       numerator = sum(subset_dt[[indicator]] == 1, na.rm = TRUE),
       denominator = sum(!is.na(subset_dt[[indicator]])),
       n_obs = nrow(subset_dt),
-      total_value = sum(subset_dt$bid_price, na.rm = TRUE) / 1000000
+      total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1000000
     )
   }
 
   # Calculate for HIGH contracts (>= 5,000,000)
-  high_stats <- calc_stats(dt[bid_price >= 5000000])
+  high_stats <- calc_stats(dt[bid_priceusd >= 5000000])
 
   # Calculate for MED contracts (>= 500,000 and < 5,000,000)
-  med_stats <- calc_stats(dt[bid_price >= 500000 & bid_price < 5000000])
+  med_stats <- calc_stats(dt[bid_priceusd >= 500000 & bid_priceusd < 5000000])
 
   # Calculate for LOW contracts (< 500,000)
-  low_stats <- calc_stats(dt[bid_price < 500000])
+  low_stats <- calc_stats(dt[bid_priceusd < 500000])
 
   # Return results as data.table
   data.table(
@@ -157,29 +191,99 @@ vcat("Selected %d files", length(files_to_load))
 proact_export_all <- list()
 
 for (file_path in files_to_load) {
-  # Extract country code from filename
-  country_code <- substr(basename(file_path), 1, 2)
   
-  vcat("Processing %s: %s", country_code, basename(file_path))
+  vcat("Processing: %s", basename(file_path))
   
   # Load CSV file
   df <- fread(file_path)
+  
+  # Extract country code from tender_country column (ISO2)
+  if (!"tender_country" %in% names(df)) {
+    stop(sprintf("Column 'tender_country' not found in file: %s", basename(file_path)))
+  }
+  
+  # Get unique country code (should be consistent within file)
+  country_codes <- unique(df$tender_country)
+  if (length(country_codes) > 1) {
+    warning(sprintf("Multiple country codes found in %s: %s. Using first one.", 
+                    basename(file_path), paste(country_codes, collapse=", ")))
+  }
+  country_code <- country_codes[1]
+  
+  # Get country name from ISO matcher
+  country_name <- iso_matcher[iso2 == country_code, country]
+  if (length(country_name) == 0) {
+    warning(sprintf("Country code %s not found in ISO matcher. Using code as name.", country_code))
+    country_name <- country_code
+  }
+  
+  vcat("  Country: %s (%s)", country_name, country_code)
+  
+  # Create tender_year from date columns with fallback logic
+  date_cols <- c(
+    "tender_publications_firstdcontractawarddate",
+    "tender_contractsignaturedate",
+    "tender_awarddecisiondate",
+    "tender_biddeadline",
+    "tender_publications_firstcallfortenderdate"
+  )
+  
+  # Parse all date columns as MDY format
+  for (col in date_cols) {
+    if (col %in% names(df)) {
+      df[, paste0(col, "_parsed") := mdy(get(col))]
+    }
+  }
+  
+  # Create tender_year with fallback logic
+  df[, tender_year := year(tender_publications_firstdcontractawarddate_parsed)]
+  df[is.na(tender_year), tender_year := year(tender_contractsignaturedate_parsed)]
+  df[is.na(tender_year), tender_year := year(tender_awarddecisiondate_parsed)]
+  df[is.na(tender_year), tender_year := year(tender_biddeadline_parsed)]
+  df[is.na(tender_year), tender_year := year(tender_publications_firstcallfortenderdate_parsed)]
+  
+  # Remove temporary parsed date columns
+  parsed_cols <- paste0(date_cols, "_parsed")
+  df[, (parsed_cols) := NULL]
   
   # Filter years between 2017 and 2024
   df <- df[tender_year >= 2017 & tender_year <= 2024]
   
   vcat("  Year distribution: %s", paste(names(table(df$tender_year)), collapse=", "))
   
-  # Fix integer overflow by converting to numeric
-  if (is.integer(df$bid_price)) {
-    vcat("  Converting bid_price to numeric for country %s", country_code)
-    df[, bid_price := as.numeric(bid_price)]
+  # Process lot_productcode to get product_market_short_name
+  if ("lot_productcode" %in% names(df)) {
+    # Extract first 2 characters
+    df[, cpv_first2 := substr(lot_productcode, 1, 2)]
+    
+    # Convert to numeric (handles "03" -> 3, "09" -> 9, etc.)
+    df[, cpv_code_numeric := as.numeric(cpv_first2)]
+    
+    # Merge with correspondence table
+    df <- merge(df, 
+                correspondence_table[, .(cpv_code, product_market_short_name)],
+                by.x = "cpv_code_numeric",
+                by.y = "cpv_code",
+                all.x = TRUE,
+                sort = FALSE)
+    
+    # Clean up temporary columns
+    df[, c("cpv_first2", "cpv_code_numeric") := NULL]
+    
+  } else {
+    warning("Column 'lot_productcode' not found. Creating NA product_market_short_name.")
+    df[, product_market_short_name := NA_character_]
   }
   
-  # Add Country_code column if not present
-  if (!"Country_code" %in% names(df)) {
-    df[, Country_code := country_code]
+  # Fix integer overflow by converting to numeric
+  if (is.integer(df$bid_priceusd)) {
+    vcat("  Converting bid_priceusd to numeric for country %s", country_code)
+    df[, bid_priceusd := as.numeric(bid_priceusd)]
   }
+  
+  # Add Country and Country_code columns
+  df[, Country := country_name]
+  df[, Country_code := country_code]
   
   # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name
   proact_export <- df[, {
