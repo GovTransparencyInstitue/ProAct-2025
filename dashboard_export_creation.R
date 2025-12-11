@@ -3,6 +3,16 @@
 ## ---- ProACT ---- ##
 ## First time edited: 12/11/2025, by Dani
 ## Last time edited: 12/11/2025, by Dani
+##
+## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW)
+## Handles missing price data gracefully by setting values to NA for affected tiers
+##
+## Price tiers:
+##   HIGH: >= $5,000,000
+##   MED:  $500,000 - $4,999,999  
+##   LOW:  < $500,000
+##
+## If price data (bid_priceusd) is missing for a country, all three tiers will have NA values
 
 suppressPackageStartupMessages({
   library(optparse)
@@ -89,8 +99,7 @@ list_of_indicators_old <- c(
   "ind_corr_subm_period",
   "ind_corr_benfords",
   "ind_winner_share",
-  "ind_tr_buyer_name_missing",
-  "ind_tr_title_missing",
+  "ind_tr_title_missing",                    # ind_tr_buyer_name_missing not in data
   "ind_tr_bidder_name_missing",
   "ind_tr_tender_supplytype_missing",
   "ind_tr_bid_price_missing",
@@ -98,8 +107,7 @@ list_of_indicators_old <- c(
   "ind_tr_proc__method_missing",
   "ind_tr_bids_nr_missing",
   "ind_tr_aw_date_missing",
-  "ind_comp_bidder_mkt_share",
-  "ind_comp_bids_count",
+  "ind_comp_bids_count",                     # ind_comp_bidder_mkt_share not in data
   "ind_comp_bidder_mkt_entry",
   "ind_comp_bidder_non_local"
 )
@@ -110,13 +118,32 @@ list_of_indicators <- list_of_indicators_old
 ## ProACT Dashboard Export Function ####
 
 # Modified function to calculate aggregate values with HIGH/MED/LOW tiers
+# Handles missing price data by creating NA rows
 calculate_proact_aggregates <- function(dt, indicator) {
-  # Ensure dt is a data.table and sort in descending order by bid_priceusd
+  # Ensure dt is a data.table
   if (!is.data.table(dt)) {
     dt <- as.data.table(dt)
   }
+  
+  # Check if bid_priceusd column exists and has any data
+  has_price_data <- "bid_priceusd" %in% names(dt) && sum(!is.na(dt$bid_priceusd)) > 0
+  
+  if (!has_price_data) {
+    # No price data - return NA rows for all three tiers
+    return(data.table(
+      Indicator = indicator,
+      Contract_value = c("HIGH", "MED", "LOW"),
+      Indicator_value = rep(NA_real_, 3),
+      Total_number_of_risky_contracts = rep(NA_integer_, 3),
+      All_contracts = rep(NA_integer_, 3),
+      n_observations = rep(NA_integer_, 3),
+      Total_contract_value_million_usd = rep(NA_real_, 3)
+    ))
+  }
+  
+  # Has price data - sort and calculate normally
   setorder(dt, -bid_priceusd)
-
+  
   # Helper function to calculate statistics for a subset
   calc_stats <- function(subset_dt) {
     if (nrow(subset_dt) == 0) {
@@ -124,11 +151,11 @@ calculate_proact_aggregates <- function(dt, indicator) {
         mean_val = NA_real_,
         numerator = NA_integer_,
         denominator = NA_integer_,
-        n_obs = 0L,
-        total_value = 0
+        n_obs = NA_integer_,
+        total_value = NA_real_
       ))
     }
-
+    
     list(
       mean_val = mean(subset_dt[[indicator]], na.rm = TRUE),
       numerator = sum(subset_dt[[indicator]] == 1, na.rm = TRUE),
@@ -137,16 +164,16 @@ calculate_proact_aggregates <- function(dt, indicator) {
       total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1000000
     )
   }
-
+  
   # Calculate for HIGH contracts (>= 5,000,000)
-  high_stats <- calc_stats(dt[bid_priceusd >= 5000000])
-
+  high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 5000000])
+  
   # Calculate for MED contracts (>= 500,000 and < 5,000,000)
-  med_stats <- calc_stats(dt[bid_priceusd >= 500000 & bid_priceusd < 5000000])
-
+  med_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
+  
   # Calculate for LOW contracts (< 500,000)
-  low_stats <- calc_stats(dt[bid_priceusd < 500000])
-
+  low_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
+  
   # Return results as data.table
   data.table(
     Indicator = indicator,
@@ -192,18 +219,26 @@ proact_export_all <- list()
 
 for (file_path in files_to_load) {
   
-  vcat("Processing: %s", basename(file_path))
+  cat(sprintf("\n=== Processing: %s ===\n", basename(file_path)))
   
   # Load CSV file
   df <- fread(file_path)
+  cat(sprintf("  Loaded %d rows, %d columns\n", nrow(df), ncol(df)))
   
   # Extract country code from tender_country column (ISO2)
   if (!"tender_country" %in% names(df)) {
-    stop(sprintf("Column 'tender_country' not found in file: %s", basename(file_path)))
+    stop(sprintf("Column 'tender_country' not found in file: %s\nAvailable columns: %s", 
+                 basename(file_path), paste(head(names(df), 10), collapse=", ")))
   }
   
   # Get unique country code (should be consistent within file)
   country_codes <- unique(df$tender_country)
+  country_codes <- country_codes[!is.na(country_codes)]  # Remove NAs
+  
+  if (length(country_codes) == 0) {
+    stop(sprintf("No valid country codes found in tender_country column for file: %s", basename(file_path)))
+  }
+  
   if (length(country_codes) > 1) {
     warning(sprintf("Multiple country codes found in %s: %s. Using first one.", 
                     basename(file_path), paste(country_codes, collapse=", ")))
@@ -211,13 +246,15 @@ for (file_path in files_to_load) {
   country_code <- country_codes[1]
   
   # Get country name from ISO matcher
-  country_name <- iso_matcher[iso2 == country_code, country]
-  if (length(country_name) == 0) {
-    warning(sprintf("Country code %s not found in ISO matcher. Using code as name.", country_code))
+  country_match <- iso_matcher[iso2 == country_code]
+  if (nrow(country_match) == 0) {
+    warning(sprintf("Country code '%s' not found in ISO matcher. Using code as name.", country_code))
     country_name <- country_code
+  } else {
+    country_name <- country_match$country[1]
   }
   
-  vcat("  Country: %s (%s)", country_name, country_code)
+  cat(sprintf("  Country: %s (%s)\n", country_name, country_code))
   
   # Create tender_year from date columns with fallback logic
   date_cols <- c(
@@ -228,10 +265,48 @@ for (file_path in files_to_load) {
     "tender_publications_firstcallfortenderdate"
   )
   
-  # Parse all date columns as MDY format
+  # Robust date parsing function that handles multiple formats and Date objects
+  parse_date_robust <- function(x) {
+    if (is.null(x) || length(x) == 0) return(as.Date(NA))
+    
+    # If already Date object, return as-is
+    if (inherits(x, "Date")) return(x)
+    
+    # If POSIXct/POSIXlt, convert to Date
+    if (inherits(x, c("POSIXct", "POSIXlt"))) return(as.Date(x))
+    
+    # If numeric (Excel date serial), convert
+    if (is.numeric(x)) return(as.Date(x, origin = "1899-12-30"))
+    
+    # Convert to character for parsing
+    x_char <- as.character(x)
+    
+    # Try multiple formats in order of likelihood
+    parsed <- suppressWarnings(mdy(x_char))  # MM/DD/YYYY or M/D/YYYY
+    if (all(is.na(parsed))) {
+      parsed <- suppressWarnings(dmy(x_char))  # DD/MM/YYYY or D/M/YYYY
+    }
+    if (all(is.na(parsed))) {
+      parsed <- suppressWarnings(ymd(x_char))  # YYYY-MM-DD
+    }
+    if (all(is.na(parsed))) {
+      parsed <- suppressWarnings(as.Date(x_char))  # Standard R date parsing
+    }
+    
+    return(parsed)
+  }
+  
+  # Parse all date columns with robust parsing
   for (col in date_cols) {
     if (col %in% names(df)) {
-      df[, paste0(col, "_parsed") := mdy(get(col))]
+      parsed_col_name <- paste0(col, "_parsed")
+      df[, (parsed_col_name) := parse_date_robust(get(col))]
+      
+      # Log parsing success rate
+      success_rate <- sum(!is.na(df[[parsed_col_name]])) / nrow(df) * 100
+      if (success_rate < 50) {
+        cat(sprintf("  WARNING: %s has low parse rate (%.1f%% successful)\n", col, success_rate))
+      }
     }
   }
   
@@ -242,22 +317,52 @@ for (file_path in files_to_load) {
   df[is.na(tender_year), tender_year := year(tender_biddeadline_parsed)]
   df[is.na(tender_year), tender_year := year(tender_publications_firstcallfortenderdate_parsed)]
   
+  # Log tender_year creation success
+  year_success_rate <- sum(!is.na(df$tender_year)) / nrow(df) * 100
+  cat(sprintf("  tender_year created: %.1f%% of rows have valid year\n", year_success_rate))
+  
   # Remove temporary parsed date columns
   parsed_cols <- paste0(date_cols, "_parsed")
   df[, (parsed_cols) := NULL]
   
+  # Log row counts before filtering
+  rows_before <- nrow(df)
+  cat(sprintf("  Rows before year filter: %d\n", rows_before))
+  
   # Filter years between 2017 and 2024
   df <- df[tender_year >= 2017 & tender_year <= 2024]
+  
+  # Log row counts after filtering
+  rows_after <- nrow(df)
+  cat(sprintf("  Rows after year filter (2017-2024): %d (%.1f%% retained)\n", 
+              rows_after, rows_after/rows_before*100))
+  
+  if (rows_after == 0) {
+    warning(sprintf("NO ROWS REMAINING after year filter for %s! Check date columns.", country_code))
+    cat("  Year distribution in original data:\n")
+    print(table(df[, tender_year], useNA = "ifany"))
+    next  # Skip this country
+  }
   
   vcat("  Year distribution: %s", paste(names(table(df$tender_year)), collapse=", "))
   
   # Process lot_productcode to get product_market_short_name
   if ("lot_productcode" %in% names(df)) {
+    # Check for NA values
+    na_count <- sum(is.na(df$lot_productcode))
+    cat(sprintf("  lot_productcode: %d non-NA (%.1f%%)\n", 
+                nrow(df) - na_count, (nrow(df) - na_count)/nrow(df)*100))
+    
     # Extract first 2 characters
-    df[, cpv_first2 := substr(lot_productcode, 1, 2)]
+    df[, cpv_first2 := substr(as.character(lot_productcode), 1, 2)]
     
     # Convert to numeric (handles "03" -> 3, "09" -> 9, etc.)
-    df[, cpv_code_numeric := as.numeric(cpv_first2)]
+    df[, cpv_code_numeric := suppressWarnings(as.numeric(cpv_first2))]
+    
+    # Count how many can be matched
+    matchable <- sum(!is.na(df$cpv_code_numeric))
+    cat(sprintf("  Matchable CPV codes: %d (%.1f%%)\n", 
+                matchable, matchable/nrow(df)*100))
     
     # Merge with correspondence table
     df <- merge(df, 
@@ -267,6 +372,11 @@ for (file_path in files_to_load) {
                 all.x = TRUE,
                 sort = FALSE)
     
+    # Count successful matches
+    matched <- sum(!is.na(df$product_market_short_name))
+    cat(sprintf("  Matched to markets: %d (%.1f%%)\n", 
+                matched, matched/nrow(df)*100))
+    
     # Clean up temporary columns
     df[, c("cpv_first2", "cpv_code_numeric") := NULL]
     
@@ -275,21 +385,68 @@ for (file_path in files_to_load) {
     df[, product_market_short_name := NA_character_]
   }
   
-  # Fix integer overflow by converting to numeric
-  if (is.integer(df$bid_priceusd)) {
-    vcat("  Converting bid_priceusd to numeric for country %s", country_code)
-    df[, bid_priceusd := as.numeric(bid_priceusd)]
+  # Handle bid_priceusd column
+  if (!"bid_priceusd" %in% names(df)) {
+    warning(sprintf("Column 'bid_priceusd' not found in %s. All price tiers will be NA.", country_code))
+    cat("  ⚠ bid_priceusd: COLUMN NOT FOUND - price tiers will be NA\n")
+    df[, bid_priceusd := NA_real_]
+  } else {
+    # Fix integer overflow by converting to numeric
+    if (is.integer(df$bid_priceusd)) {
+      cat(sprintf("  Converting bid_priceusd to numeric for country %s\n", country_code))
+      df[, bid_priceusd := as.numeric(bid_priceusd)]
+    }
+    
+    # Log price statistics
+    price_na <- sum(is.na(df$bid_priceusd))
+    price_available <- nrow(df) - price_na
+    
+    if (price_available == 0) {
+      cat(sprintf("  ⚠ bid_priceusd: 0 non-NA (0%%) - ALL price tiers will be NA\n"))
+    } else {
+      cat(sprintf("  ✓ bid_priceusd: %s non-NA (%.1f%%), median: $%s\n",
+                  format(price_available, big.mark=","),
+                  (price_available/nrow(df)*100),
+                  format(round(median(df$bid_priceusd, na.rm=TRUE)), big.mark=",")))
+      
+      # Show distribution across price tiers
+      high_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 5000000)
+      med_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 500000 & df$bid_priceusd < 5000000)
+      low_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd < 500000)
+      
+      cat(sprintf("    HIGH (≥$5M): %s (%.1f%%), MED ($500K-$5M): %s (%.1f%%), LOW (<$500K): %s (%.1f%%)\n",
+                  format(high_count, big.mark=","), high_count/price_available*100,
+                  format(med_count, big.mark=","), med_count/price_available*100,
+                  format(low_count, big.mark=","), low_count/price_available*100))
+    }
   }
   
   # Add Country and Country_code columns
   df[, Country := country_name]
   df[, Country_code := country_code]
   
+  cat(sprintf("  Data ready for aggregation: %s rows\n", format(nrow(df), big.mark=",")))
+  
   # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name
   proact_export <- df[, {
-    rbindlist(lapply(list_of_indicators, function(ind) {
-      calculate_proact_aggregates(.SD, ind)
-    }))
+    # Only process indicators that exist in the data
+    available_indicators <- intersect(list_of_indicators, names(.SD))
+    
+    if (length(available_indicators) == 0) {
+      warning(sprintf("No indicators found in data for %s!", country_code))
+      data.table()
+    } else {
+      missing_indicators <- setdiff(list_of_indicators, names(.SD))
+      if (length(missing_indicators) > 0) {
+        cat(sprintf("  Skipping %d missing indicators: %s\n", 
+                    length(missing_indicators), 
+                    paste(head(missing_indicators, 3), collapse=", ")))
+      }
+      
+      rbindlist(lapply(available_indicators, function(ind) {
+        calculate_proact_aggregates(.SD, ind)
+      }))
+    }
   }, by = .(Country, Country_code, tender_year, product_market_short_name)]
   
   # Set values to NA for groups with less than min-contracts
@@ -307,14 +464,17 @@ for (file_path in files_to_load) {
   
   proact_export_all[[country_code]] <- proact_export
   
-  vcat("  Completed %s", country_code)
+  cat(sprintf("  ✓ Completed %s: Generated %d rows of aggregated data\n", country_code, nrow(proact_export)))
 }
+
+cat("\n=== All countries processed ===\n")
 
 # IV. Combine and export ####
 
 # Combine all countries
-vcat("Combining all country tables...")
+cat("\nCombining all country tables...\n")
 proact_combined <- rbindlist(proact_export_all)
+cat(sprintf("Combined dataset: %d rows, %d columns\n", nrow(proact_combined), ncol(proact_combined)))
 
 # Function to add ISO3 codes
 add_iso3 <- function(dt, iso_matcher) {
@@ -346,8 +506,9 @@ add_iso3 <- function(dt, iso_matcher) {
 }
 
 # Add ISO3 codes
-vcat("Adding ISO3 codes...")
+cat("Adding ISO3 codes...\n")
 proact_combined <- add_iso3(proact_combined, iso_matcher)
+cat("ISO3 codes added successfully\n")
 
 # Reorder columns: Country, ISO2, ISO3, then the rest
 setcolorder(proact_combined, c(
@@ -360,7 +521,32 @@ proact_combined[proact_combined == "NaN"] <- NA
 
 # Export combined table
 output_file <- file.path(out_dir, "ProACT_dashboard_export.csv")
-vcat("Exporting to: %s", output_file)
+cat(sprintf("\nExporting to: %s\n", output_file))
 fwrite(proact_combined, output_file)
 
-vcat("Export complete!")
+cat(sprintf("\n=== ✓ Export complete! ===\n"))
+cat(sprintf("Output file: %s\n", output_file))
+cat(sprintf("Total rows exported: %s\n", format(nrow(proact_combined), big.mark=",")))
+cat(sprintf("Unique countries: %d\n", length(unique(proact_combined$Country_code_ISO_2))))
+cat(sprintf("Year range: %d-%d\n", 
+            min(proact_combined$tender_year, na.rm=TRUE), 
+            max(proact_combined$tender_year, na.rm=TRUE)))
+
+# Report on data completeness
+rows_with_data <- sum(!is.na(proact_combined$Indicator_value))
+rows_with_na <- sum(is.na(proact_combined$Indicator_value))
+cat(sprintf("\nData completeness:\n"))
+cat(sprintf("  Rows with data: %s (%.1f%%)\n", 
+            format(rows_with_data, big.mark=","), 
+            rows_with_data/nrow(proact_combined)*100))
+cat(sprintf("  Rows with NA: %s (%.1f%%) - likely due to missing price data or low sample size\n", 
+            format(rows_with_na, big.mark=","), 
+            rows_with_na/nrow(proact_combined)*100))
+
+# Show countries with missing price data
+countries_with_all_na <- proact_combined[, .(all_na = all(is.na(Indicator_value))), 
+                                         by = Country_code_ISO_2][all_na == TRUE]
+if (nrow(countries_with_all_na) > 0) {
+  cat(sprintf("\n⚠ Countries with ALL NA values (no price data): %s\n", 
+              paste(countries_with_all_na$Country_code_ISO_2, collapse=", ")))
+}
