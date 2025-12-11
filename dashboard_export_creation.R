@@ -5,6 +5,7 @@
 ## Last time edited: 12/11/2025, by Dani
 ##
 ## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW)
+## Year filter: 2000-2025
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
 ## Price tiers:
@@ -143,7 +144,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
   
   # Has price data - sort and calculate normally
   setorder(dt, -bid_priceusd)
-  
+
   # Helper function to calculate statistics for a subset
   calc_stats <- function(subset_dt) {
     if (nrow(subset_dt) == 0) {
@@ -155,7 +156,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
         total_value = NA_real_
       ))
     }
-    
+
     list(
       mean_val = mean(subset_dt[[indicator]], na.rm = TRUE),
       numerator = sum(subset_dt[[indicator]] == 1, na.rm = TRUE),
@@ -164,16 +165,16 @@ calculate_proact_aggregates <- function(dt, indicator) {
       total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1000000
     )
   }
-  
+
   # Calculate for HIGH contracts (>= 5,000,000)
   high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 5000000])
-  
+
   # Calculate for MED contracts (>= 500,000 and < 5,000,000)
   med_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
-  
+
   # Calculate for LOW contracts (< 500,000)
   low_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
-  
+
   # Return results as data.table
   data.table(
     Indicator = indicator,
@@ -329,12 +330,12 @@ for (file_path in files_to_load) {
   rows_before <- nrow(df)
   cat(sprintf("  Rows before year filter: %d\n", rows_before))
   
-  # Filter years between 2017 and 2024
-  df <- df[tender_year >= 2017 & tender_year <= 2024]
+  # Filter years between 2000 and 2025
+  df <- df[tender_year >= 2000 & tender_year <= 2025]
   
   # Log row counts after filtering
   rows_after <- nrow(df)
-  cat(sprintf("  Rows after year filter (2017-2024): %d (%.1f%% retained)\n", 
+  cat(sprintf("  Rows after year filter (2000-2025): %d (%.1f%% retained)\n", 
               rows_after, rows_after/rows_before*100))
   
   if (rows_after == 0) {
@@ -545,7 +546,7 @@ cat(sprintf("  Rows with NA: %s (%.1f%%) - likely due to missing price data or l
 
 # Show countries with missing price data
 countries_with_all_na <- proact_combined[, .(all_na = all(is.na(Indicator_value))), 
-                                         by = Country_code_ISO_2][all_na == TRUE]
+                                          by = Country_code_ISO_2][all_na == TRUE]
 if (nrow(countries_with_all_na) > 0) {
   cat(sprintf("\n⚠ Countries with ALL NA values (no price data): %s\n", 
               paste(countries_with_all_na$Country_code_ISO_2, collapse=", ")))
