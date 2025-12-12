@@ -33,6 +33,18 @@ setnames(iso_matcher, tolower(names(iso_matcher)))
 correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Dani local path
 correspondence_table <- as.data.table(correspondence_table)
 
+# Load indicator short names for labeling
+# indicator_labels <- readxl::read_excel("/gti/tmp/_ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
+indicator_labels <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
+indicator_labels <- as.data.table(indicator_labels)
+setnames(indicator_labels, make.names(names(indicator_labels))) # Clean column names
+
+# Load indicator names lookup table
+# ind_names_lookup <- readxl::read_excel("/gti/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Server PATH
+ind_names_lookup <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
+ind_names_lookup <- as.data.table(ind_names_lookup)
+setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace spaces with underscores in column names
+
 # ---------- CLI ----------
 opt_list <- list(
   make_option(c("--input-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Input_data"),  # Dani local path --> Change to your PATH
@@ -91,31 +103,31 @@ list_of_indicators_new <- c(
   "ind_impl_time_overrun"
 )
 
-# Old indicators list (currently in use)
-# list_of_indicators_old <- c(
-#   "ind_corr_nocft",
-#   "ind_corr_singleb",
-#   "ind_corr_taxhaven",
-#   "ind_corr_dec_period",
-#   "ind_corr_nonopen_proc_method",
-#   "ind_corr_subm_period",
-#   "ind_corr_benfords",
-#   "ind_winner_share",
-#   "ind_tr_title_missing",                    # ind_tr_buyer_name_missing not in data
-#   "ind_tr_bidder_name_missing",
-#   "ind_tr_tender_supplytype_missing",
-#   "ind_tr_bid_price_missing",
-#   "ind_tr_impl_loc_missing",
-#   "ind_tr_proc__method_missing",
-#   "ind_tr_bids_nr_missing",
-#   "ind_tr_aw_date_missing",
-#   "ind_comp_bids_count",                     # ind_comp_bidder_mkt_share not in data
-#   "ind_comp_bidder_mkt_entry",
-#   "ind_comp_bidder_non_local"
-# )
+# Old indicators list
+list_of_indicators_old <- c(
+  "ind_corr_nocft",
+  "ind_corr_singleb",
+  "ind_corr_taxhaven",
+  "ind_corr_dec_period",
+  "ind_corr_nonopen_proc_method",
+  "ind_corr_subm_period",
+  "ind_corr_benfords",
+  "ind_winner_share",
+  "ind_tr_title_missing",
+  "ind_tr_bidder_name_missing",
+  "ind_tr_tender_supplytype_missing",
+  "ind_tr_bid_price_missing",
+  "ind_tr_impl_loc_missing",
+  "ind_tr_proc__method_missing",
+  "ind_tr_bids_nr_missing",
+  "ind_tr_aw_date_missing",
+  "ind_comp_bids_count",
+  "ind_comp_bidder_mkt_entry",
+  "ind_comp_bidder_non_local"
+)
 
 # Set active indicators list
-list_of_indicators <- list_of_indicators_old
+list_of_indicators <- list_of_indicators_new
 
 ## ProACT Dashboard Export Function ####
 
@@ -429,26 +441,37 @@ for (file_path in files_to_load) {
   
   cat(sprintf("  Data ready for aggregation: %s rows\n", format(nrow(df), big.mark=",")))
   
+  # Log market distribution before aggregation
+  na_markets <- sum(is.na(df$product_market_short_name))
+  if (na_markets > 0) {
+    cat(sprintf("  Note: %s rows (%.1f%%) have NA product_market_short_name\n",
+                format(na_markets, big.mark=","),
+                na_markets/nrow(df)*100))
+  }
+  
+  # Check which indicators are available (print once per country, not per group)
+  available_indicators <- intersect(list_of_indicators, names(df))
+  missing_indicators <- setdiff(list_of_indicators, names(df))
+  
+  if (length(available_indicators) == 0) {
+    warning(sprintf("No indicators found in data for %s!", country_code))
+    next  # Skip this country
+  }
+  
+  if (length(missing_indicators) > 0) {
+    cat(sprintf("  Skipping %d missing indicators: %s\n", 
+                length(missing_indicators), 
+                paste(head(missing_indicators, 3), collapse=", ")))
+    if (length(missing_indicators) > 3) {
+      cat(sprintf("    ... and %d more\n", length(missing_indicators) - 3))
+    }
+  }
+  
   # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name
   proact_export <- df[, {
-    # Only process indicators that exist in the data
-    available_indicators <- intersect(list_of_indicators, names(.SD))
-    
-    if (length(available_indicators) == 0) {
-      warning(sprintf("No indicators found in data for %s!", country_code))
-      data.table()
-    } else {
-      missing_indicators <- setdiff(list_of_indicators, names(.SD))
-      if (length(missing_indicators) > 0) {
-        cat(sprintf("  Skipping %d missing indicators: %s\n", 
-                    length(missing_indicators), 
-                    paste(head(missing_indicators, 3), collapse=", ")))
-      }
-      
-      rbindlist(lapply(available_indicators, function(ind) {
-        calculate_proact_aggregates(.SD, ind)
-      }))
-    }
+    rbindlist(lapply(available_indicators, function(ind) {
+      calculate_proact_aggregates(.SD, ind)
+    }))
   }, by = .(Country, Country_code, tender_year, product_market_short_name)]
   
   # Set values to NA for groups with less than min-contracts
@@ -458,15 +481,33 @@ for (file_path in files_to_load) {
     All_contracts = NA_integer_
   )]
   
-  # Remove n_observations column
-  proact_export[, n_observations := NULL]
+  # Keep n_observations for verification (don't delete it)
+  # This allows users to verify data completeness
   
   # Add Indicator_availability_filter column
   proact_export[, Indicator_availability_filter := fifelse(is.na(Indicator_value), 0L, 1L)]
   
+  # Log aggregation results
+  na_market_rows <- sum(is.na(proact_export$product_market_short_name))
+  if (na_market_rows > 0) {
+    cat(sprintf("  Note: %s output rows (%.1f%%) have NA product_market_short_name\n",
+                format(na_market_rows, big.mark=","),
+                na_market_rows/nrow(proact_export)*100))
+  }
+  
+  # Show data availability
+  available_rows <- sum(proact_export$Indicator_availability_filter == 1)
+  cat(sprintf("  Data availability: %s rows with data (%.1f%%), %s rows NA (%.1f%%)\n",
+              format(available_rows, big.mark=","),
+              available_rows/nrow(proact_export)*100,
+              format(nrow(proact_export) - available_rows, big.mark=","),
+              (nrow(proact_export) - available_rows)/nrow(proact_export)*100))
+  
   proact_export_all[[country_code]] <- proact_export
   
-  cat(sprintf("  ✓ Completed %s: Generated %d rows of aggregated data\n", country_code, nrow(proact_export)))
+  cat(sprintf("  ✓ Completed %s: Generated %s rows of aggregated data\n", 
+              country_code, 
+              format(nrow(proact_export), big.mark=",")))
 }
 
 cat("\n=== All countries processed ===\n")
@@ -477,6 +518,44 @@ cat("\n=== All countries processed ===\n")
 cat("\nCombining all country tables...\n")
 proact_combined <- rbindlist(proact_export_all)
 cat(sprintf("Combined dataset: %d rows, %d columns\n", nrow(proact_combined), ncol(proact_combined)))
+
+# Add indicator labels from lookup table
+cat("Matching indicator names with labels...\n")
+
+# Create Indicator_original_name column (keep original technical names)
+proact_combined[, Indicator_original_name := Indicator]
+
+# Merge with lookup table to get the 50-character labels
+proact_combined <- merge(proact_combined,
+                         ind_names_lookup[, .(Indicator_name_in_dataset, Indicator_NEW_short_50)],
+                         by.x = "Indicator_original_name",
+                         by.y = "Indicator_name_in_dataset",
+                         all.x = TRUE,
+                         sort = FALSE)
+
+# Check for unmatched indicators
+unmatched_ind <- proact_combined[is.na(Indicator_NEW_short_50), unique(Indicator_original_name)]
+if (length(unmatched_ind) > 0) {
+  warning(sprintf("Indicators without label match: %s", paste(unmatched_ind, collapse = ", ")))
+  cat(sprintf("  ⚠ WARNING: %d indicators have no label match and will keep original names\n", length(unmatched_ind)))
+}
+
+# Replace Indicator column with the 50-character label
+# If no match found, keep the original name
+proact_combined[, Indicator := fifelse(is.na(Indicator_NEW_short_50), 
+                                       Indicator_original_name, 
+                                       Indicator_NEW_short_50)]
+
+# Remove the temporary merge column
+proact_combined[, Indicator_NEW_short_50 := NULL]
+
+# Reorder so Indicator_original_name comes right after Indicator
+# Get all column names except the ones we want to position
+other_cols <- setdiff(names(proact_combined), c("Indicator", "Indicator_original_name"))
+setcolorder(proact_combined, c("Indicator", "Indicator_original_name", other_cols))
+
+cat(sprintf("Indicator labels applied: %d unique indicators\n", 
+            length(unique(proact_combined$Indicator))))
 
 # Function to add ISO3 codes
 add_iso3 <- function(dt, iso_matcher) {
@@ -512,10 +591,12 @@ cat("Adding ISO3 codes...\n")
 proact_combined <- add_iso3(proact_combined, iso_matcher)
 cat("ISO3 codes added successfully\n")
 
-# Reorder columns: Country, ISO2, ISO3, then the rest
+# Reorder columns: Country, ISO2, ISO3, Indicator, Indicator_original_name, then the rest
 setcolorder(proact_combined, c(
-  "Country", "Country_code_ISO_2", "Country_code_ISO_3",
-  setdiff(names(proact_combined), c("Country", "Country_code_ISO_2", "Country_code_ISO_3"))
+  "Country", "Country_code_ISO_2", "Country_code_ISO_3", 
+  "Indicator", "Indicator_original_name",
+  setdiff(names(proact_combined), c("Country", "Country_code_ISO_2", "Country_code_ISO_3", 
+                                    "Indicator", "Indicator_original_name"))
 ))
 
 # Replace NaN with NA
@@ -535,20 +616,42 @@ cat(sprintf("Year range: %d-%d\n",
             max(proact_combined$tender_year, na.rm=TRUE)))
 
 # Report on data completeness
-rows_with_data <- sum(!is.na(proact_combined$Indicator_value))
-rows_with_na <- sum(is.na(proact_combined$Indicator_value))
+rows_with_data <- sum(proact_combined$Indicator_availability_filter == 1)
+rows_with_na <- sum(proact_combined$Indicator_availability_filter == 0)
 cat(sprintf("\nData completeness:\n"))
 cat(sprintf("  Rows with data: %s (%.1f%%)\n", 
             format(rows_with_data, big.mark=","), 
             rows_with_data/nrow(proact_combined)*100))
-cat(sprintf("  Rows with NA: %s (%.1f%%) - likely due to missing price data or low sample size\n", 
+cat(sprintf("  Rows with NA: %s (%.1f%%) - due to <10 contracts or missing price data\n", 
             format(rows_with_na, big.mark=","), 
             rows_with_na/nrow(proact_combined)*100))
 
-# Show countries with missing price data
-countries_with_all_na <- proact_combined[, .(all_na = all(is.na(Indicator_value))), 
+# Report on unmatched markets
+na_market_count <- sum(is.na(proact_combined$product_market_short_name))
+if (na_market_count > 0) {
+  cat(sprintf("\nUnmatched markets:\n"))
+  cat(sprintf("  Rows with NA product_market: %s (%.1f%%)\n",
+              format(na_market_count, big.mark=","),
+              na_market_count/nrow(proact_combined)*100))
+  
+  # Show by country
+  na_by_country <- proact_combined[is.na(product_market_short_name), 
+                                   .N, 
+                                   by = Country_code_ISO_2]
+  if (nrow(na_by_country) > 0) {
+    cat("  By country:\n")
+    for (i in 1:nrow(na_by_country)) {
+      cat(sprintf("    %s: %s rows\n", 
+                  na_by_country$Country_code_ISO_2[i],
+                  format(na_by_country$N[i], big.mark=",")))
+    }
+  }
+}
+
+# Show countries with all NA values (completely missing price data)
+countries_with_all_na <- proact_combined[, .(all_na = all(Indicator_availability_filter == 0)), 
                                          by = Country_code_ISO_2][all_na == TRUE]
 if (nrow(countries_with_all_na) > 0) {
-  cat(sprintf("\n⚠ Countries with ALL NA values (no price data): %s\n", 
+  cat(sprintf("\n⚠ Countries with ALL NA values (no usable data): %s\n", 
               paste(countries_with_all_na$Country_code_ISO_2, collapse=", ")))
 }
