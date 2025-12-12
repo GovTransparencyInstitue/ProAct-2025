@@ -29,13 +29,14 @@ iso_matcher <- fread("C:/GTI/TMP/ISO_matcher.csv") # Dani local path
 setnames(iso_matcher, tolower(names(iso_matcher)))
 
 # Load correspondence table for product market matching
-correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels")
+# correspondence_table <- readxl::read_excel("/gti/tmp/_UNDP/Utility_datasets/Product_codes/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Server PATH
+correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Dani local path
 correspondence_table <- as.data.table(correspondence_table)
 
 # ---------- CLI ----------
 opt_list <- list(
-  make_option(c("--input-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Input_data"),
-  make_option(c("--output-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Output_data"),
+  make_option(c("--input-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Input_data"),  # Dani local path --> Change to your PATH
+  make_option(c("--output-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Output_data"),  # Dani local path --> Change to your PATH
   make_option(c("--output-subdir"), type="character", default=format(Sys.Date(), "%m%d")),
   make_option(c("--min-contracts"), type="integer", default=10),
   make_option(c("--verbose"), action="store_true", default=FALSE)
@@ -55,63 +56,63 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 vcat("Output: %s", out_dir)
 
 # ---------- Indicators lists ----------
-# New indicators list (for future use)
-# list_of_indicators_new <- c(
-#   "ind_tr_proc_type",
-#   "ind_tr_buyer_id",
-#   "ind_tr_supplier_id",
-#   "ind_tr_bidder_id",
-#   "ind_tr_call_pub",
-#   "ind_tr_bid_deadline",
-#   "ind_tr_bid_opening",
-#   "ind_tr_award_pub",
-#   "ind_tr_prod_code",
-#   "ind_tr_buyer_loc",
-#   "ind_tr_supplier_loc",
-#   "ind_tr_impl_loc",
-#   "ind_tr_bidder_loc",
-#   "ind_tr_contract_value",
-#   "ind_tr_benford",
-#   "ind_op_open_proc",
-#   "ind_op_nonopen_proc",
-#   "ind_op_adv_period",
-#   "ind_op_short_adv_flag",
-#   "ind_adm_dec_period",
-#   "ind_adm_long_dec_flag",
-#   "ind_comp_avg_bids",
-#   "ind_comp_single_bid",
-#   "ind_comp_new_suppliers",
-#   "ind_comp_sector_concentration",
-#   "ind_comp_foreign_suppliers",
-#   "ind_comp_tax_haven_suppliers",
-#   "ind_econ_sector_composition",
-#   "ind_econ_buyer_concentration",
-#   "ind_impl_cost_overrun",
-#   "ind_impl_time_overrun"
-# )
+#New indicators list (for future use)
+list_of_indicators_new <- c(
+  "ind_tr_proc_type",
+  "ind_tr_buyer_id",
+  "ind_tr_supplier_id",
+  "ind_tr_bidder_id",
+  "ind_tr_call_pub",
+  "ind_tr_bid_deadline",
+  "ind_tr_bid_opening",
+  "ind_tr_award_pub",
+  "ind_tr_prod_code",
+  "ind_tr_buyer_loc",
+  "ind_tr_supplier_loc",
+  "ind_tr_impl_loc",
+  "ind_tr_bidder_loc",
+  "ind_tr_contract_value",
+  "ind_tr_benford",
+  "ind_op_open_proc",
+  "ind_op_nonopen_proc",
+  "ind_op_adv_period",
+  "ind_op_short_adv_flag",
+  "ind_adm_dec_period",
+  "ind_adm_long_dec_flag",
+  "ind_comp_avg_bids",
+  "ind_comp_single_bid",
+  "ind_comp_new_suppliers",
+  "ind_comp_sector_concentration",
+  "ind_comp_foreign_suppliers",
+  "ind_comp_tax_haven_suppliers",
+  "ind_econ_sector_composition",
+  "ind_econ_buyer_concentration",
+  "ind_impl_cost_overrun",
+  "ind_impl_time_overrun"
+)
 
 # Old indicators list (currently in use)
-list_of_indicators_old <- c(
-  "ind_corr_nocft",
-  "ind_corr_singleb",
-  "ind_corr_taxhaven",
-  "ind_corr_dec_period",
-  "ind_corr_nonopen_proc_method",
-  "ind_corr_subm_period",
-  "ind_corr_benfords",
-  "ind_winner_share",
-  "ind_tr_title_missing",                    # ind_tr_buyer_name_missing not in data
-  "ind_tr_bidder_name_missing",
-  "ind_tr_tender_supplytype_missing",
-  "ind_tr_bid_price_missing",
-  "ind_tr_impl_loc_missing",
-  "ind_tr_proc__method_missing",
-  "ind_tr_bids_nr_missing",
-  "ind_tr_aw_date_missing",
-  "ind_comp_bids_count",                     # ind_comp_bidder_mkt_share not in data
-  "ind_comp_bidder_mkt_entry",
-  "ind_comp_bidder_non_local"
-)
+# list_of_indicators_old <- c(
+#   "ind_corr_nocft",
+#   "ind_corr_singleb",
+#   "ind_corr_taxhaven",
+#   "ind_corr_dec_period",
+#   "ind_corr_nonopen_proc_method",
+#   "ind_corr_subm_period",
+#   "ind_corr_benfords",
+#   "ind_winner_share",
+#   "ind_tr_title_missing",                    # ind_tr_buyer_name_missing not in data
+#   "ind_tr_bidder_name_missing",
+#   "ind_tr_tender_supplytype_missing",
+#   "ind_tr_bid_price_missing",
+#   "ind_tr_impl_loc_missing",
+#   "ind_tr_proc__method_missing",
+#   "ind_tr_bids_nr_missing",
+#   "ind_tr_aw_date_missing",
+#   "ind_comp_bids_count",                     # ind_comp_bidder_mkt_share not in data
+#   "ind_comp_bidder_mkt_entry",
+#   "ind_comp_bidder_non_local"
+# )
 
 # Set active indicators list
 list_of_indicators <- list_of_indicators_old
@@ -144,7 +145,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
   
   # Has price data - sort and calculate normally
   setorder(dt, -bid_priceusd)
-
+  
   # Helper function to calculate statistics for a subset
   calc_stats <- function(subset_dt) {
     if (nrow(subset_dt) == 0) {
@@ -156,7 +157,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
         total_value = NA_real_
       ))
     }
-
+    
     list(
       mean_val = mean(subset_dt[[indicator]], na.rm = TRUE),
       numerator = sum(subset_dt[[indicator]] == 1, na.rm = TRUE),
@@ -165,16 +166,16 @@ calculate_proact_aggregates <- function(dt, indicator) {
       total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1000000
     )
   }
-
+  
   # Calculate for HIGH contracts (>= 5,000,000)
   high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 5000000])
-
+  
   # Calculate for MED contracts (>= 500,000 and < 5,000,000)
   med_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
-
+  
   # Calculate for LOW contracts (< 500,000)
   low_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
-
+  
   # Return results as data.table
   data.table(
     Indicator = indicator,
@@ -546,7 +547,7 @@ cat(sprintf("  Rows with NA: %s (%.1f%%) - likely due to missing price data or l
 
 # Show countries with missing price data
 countries_with_all_na <- proact_combined[, .(all_na = all(is.na(Indicator_value))), 
-                                          by = Country_code_ISO_2][all_na == TRUE]
+                                         by = Country_code_ISO_2][all_na == TRUE]
 if (nrow(countries_with_all_na) > 0) {
   cat(sprintf("\n⚠ Countries with ALL NA values (no price data): %s\n", 
               paste(countries_with_all_na$Country_code_ISO_2, collapse=", ")))
