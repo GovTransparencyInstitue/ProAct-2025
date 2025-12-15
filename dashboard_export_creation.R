@@ -50,7 +50,6 @@ opt_list <- list(
   make_option(c("--input-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Input_data"),  # Dani local path --> Change to your PATH
   make_option(c("--output-dir"), type="character", default="C:/GTI/ProACT 2025/Data/Output_data"),  # Dani local path --> Change to your PATH
   make_option(c("--output-subdir"), type="character", default=format(Sys.Date(), "%m%d")),
-  make_option(c("--min-contracts"), type="integer", default=10),
   make_option(c("--verbose"), action="store_true", default=FALSE)
 )
 opt <- parse_args(OptionParser(option_list = opt_list))
@@ -474,16 +473,6 @@ for (file_path in files_to_load) {
     }))
   }, by = .(Country, Country_code, tender_year, product_market_short_name)]
   
-  # Set values to NA for groups with less than min-contracts
-  proact_export[n_observations < opt$`min-contracts`, `:=`(
-    Indicator_value = NA_real_,
-    Total_number_of_risky_contracts = NA_integer_,
-    All_contracts = NA_integer_
-  )]
-  
-  # Keep n_observations for verification (don't delete it)
-  # This allows users to verify data completeness
-  
   # Add Indicator_availability_filter column
   proact_export[, Indicator_availability_filter := fifelse(is.na(Indicator_value), 0L, 1L)]
   
@@ -622,7 +611,7 @@ cat(sprintf("\nData completeness:\n"))
 cat(sprintf("  Rows with data: %s (%.1f%%)\n", 
             format(rows_with_data, big.mark=","), 
             rows_with_data/nrow(proact_combined)*100))
-cat(sprintf("  Rows with NA: %s (%.1f%%) - due to <10 contracts or missing price data\n", 
+cat(sprintf("  Rows with NA: %s (%.1f%%) - due to missing price data\n", 
             format(rows_with_na, big.mark=","), 
             rows_with_na/nrow(proact_combined)*100))
 
