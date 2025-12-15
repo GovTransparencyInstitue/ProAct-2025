@@ -2,10 +2,10 @@
 
 ## ---- ProACT ---- ##
 ## First time edited: 12/11/2025, by Dani
-## Last time edited: 12/11/2025, by Dani
+## Last time edited: 12/15/2025, by Dani
 ##
 ## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW)
-## Year filter: 2000-2025
+## Year filter: 2000-2020
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
 ## Price tiers:
@@ -343,12 +343,12 @@ for (file_path in files_to_load) {
   rows_before <- nrow(df)
   cat(sprintf("  Rows before year filter: %d\n", rows_before))
   
-  # Filter years between 2000 and 2025
-  df <- df[tender_year >= 2000 & tender_year <= 2025]
+  # Filter years between 2000 and 2020
+  df <- df[tender_year >= 2000 & tender_year <= 2020]
   
   # Log row counts after filtering
   rows_after <- nrow(df)
-  cat(sprintf("  Rows after year filter (2000-2025): %d (%.1f%% retained)\n", 
+  cat(sprintf("  Rows after year filter (2000-2020): %d (%.1f%% retained)\n", 
               rows_after, rows_after/rows_before*100))
   
   if (rows_after == 0) {
