@@ -2,9 +2,9 @@
 
 ## ---- ProACT ---- ##
 ## First time edited: 12/11/2025, by Dani
-## Last time edited: 12/15/2025, by Dani
+## Last time edited: 12/16/2025, by Dani
 ##
-## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW)
+## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type
 ## Year filter: 2000-2020
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
@@ -12,6 +12,8 @@
 ##   HIGH: >= $5,000,000
 ##   MED:  $500,000 - $4,999,999  
 ##   LOW:  < $500,000
+##
+## Supply types: WORKS, SERVICES, SUPPLIES (+ NA for missing)
 ##
 ## If price data (bid_priceusd) is missing for a country, all three tiers will have NA values
 
@@ -398,6 +400,42 @@ for (file_path in files_to_load) {
     df[, product_market_short_name := NA_character_]
   }
   
+  # Handle tender_supplytype column
+  if (!"tender_supplytype" %in% names(df)) {
+    warning(sprintf("Column 'tender_supplytype' not found in %s. Creating NA column.", country_code))
+    cat("  ⚠ tender_supplytype: COLUMN NOT FOUND - all values will be NA\n")
+    df[, tender_supplytype := NA_character_]
+  } else {
+    # Standardize supply type values to capital case (First letter uppercase, rest lowercase)
+    df[, tender_supplytype := str_to_title(as.character(tender_supplytype))]
+    
+    # Log supply type statistics
+    supplytype_na <- sum(is.na(df$tender_supplytype))
+    supplytype_available <- nrow(df) - supplytype_na
+    
+    if (supplytype_available == 0) {
+      cat(sprintf("  ⚠ tender_supplytype: 0 non-NA (0%%) - all values are NA\n"))
+    } else {
+      cat(sprintf("  ✓ tender_supplytype: %s non-NA (%.1f%%)\n",
+                  format(supplytype_available, big.mark=","),
+                  (supplytype_available/nrow(df)*100)))
+      
+      # Show distribution across supply types
+      supply_dist <- table(df$tender_supplytype, useNA = "ifany")
+      cat(sprintf("    Distribution: "))
+      for (i in seq_along(supply_dist)) {
+        type_name <- names(supply_dist)[i]
+        if (is.na(type_name)) type_name <- "NA"
+        cat(sprintf("%s: %s (%.1f%%)", 
+                    type_name, 
+                    format(supply_dist[i], big.mark=","),
+                    supply_dist[i]/nrow(df)*100))
+        if (i < length(supply_dist)) cat(", ")
+      }
+      cat("\n")
+    }
+  }
+  
   # Handle bid_priceusd column
   if (!"bid_priceusd" %in% names(df)) {
     warning(sprintf("Column 'bid_priceusd' not found in %s. All price tiers will be NA.", country_code))
@@ -466,12 +504,12 @@ for (file_path in files_to_load) {
     }
   }
   
-  # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name
+  # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name, tender_supplytype
   proact_export <- df[, {
     rbindlist(lapply(available_indicators, function(ind) {
       calculate_proact_aggregates(.SD, ind)
     }))
-  }, by = .(Country, Country_code, tender_year, product_market_short_name)]
+  }, by = .(Country, Country_code, tender_year, product_market_short_name, tender_supplytype)]
   
   # Add Indicator_availability_filter column
   proact_export[, Indicator_availability_filter := fifelse(is.na(Indicator_value), 0L, 1L)]
@@ -482,6 +520,13 @@ for (file_path in files_to_load) {
     cat(sprintf("  Note: %s output rows (%.1f%%) have NA product_market_short_name\n",
                 format(na_market_rows, big.mark=","),
                 na_market_rows/nrow(proact_export)*100))
+  }
+  
+  na_supplytype_rows <- sum(is.na(proact_export$tender_supplytype))
+  if (na_supplytype_rows > 0) {
+    cat(sprintf("  Note: %s output rows (%.1f%%) have NA tender_supplytype\n",
+                format(na_supplytype_rows, big.mark=","),
+                na_supplytype_rows/nrow(proact_export)*100))
   }
   
   # Show data availability
@@ -614,6 +659,21 @@ cat(sprintf("  Rows with data: %s (%.1f%%)\n",
 cat(sprintf("  Rows with NA: %s (%.1f%%) - due to missing price data\n", 
             format(rows_with_na, big.mark=","), 
             rows_with_na/nrow(proact_combined)*100))
+
+# Report on dimension completeness
+cat(sprintf("\nDimension completeness:\n"))
+
+# Supply type distribution
+supplytype_dist <- table(proact_combined$tender_supplytype, useNA = "ifany")
+cat(sprintf("  Supply type distribution:\n"))
+for (i in seq_along(supplytype_dist)) {
+  type_name <- names(supplytype_dist)[i]
+  if (is.na(type_name)) type_name <- "NA"
+  cat(sprintf("    %s: %s rows (%.1f%%)\n", 
+              type_name,
+              format(supplytype_dist[i], big.mark=","),
+              supplytype_dist[i]/nrow(proact_combined)*100))
+}
 
 # Report on unmatched markets
 na_market_count <- sum(is.na(proact_combined$product_market_short_name))
