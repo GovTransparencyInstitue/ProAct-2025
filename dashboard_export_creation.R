@@ -2,7 +2,7 @@
 
 ## ---- ProACT ---- ##
 ## First time edited: 12/11/2025, by Dani
-## Last time edited: 12/16/2025, by Dani
+## Last time edited: 12/17/2025, by Dani
 ##
 ## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type
 ## Year filter: 2000-2020
@@ -26,23 +26,23 @@ suppressPackageStartupMessages({
 })
 
 # Load ISO matcher for ISO3 codes
-# iso_matcher <- fread("/gti/tmp/_UNDP/Utility_datasets/Other/ISO_matcher.csv") # Server PATH
+# iso_matcher <- fread("/gti/tmp/ProACT/Utility_datasets/ISO_matcher.csv") # Server PATH
 iso_matcher <- fread("C:/GTI/TMP/ISO_matcher.csv") # Dani local path
 setnames(iso_matcher, tolower(names(iso_matcher)))
 
 # Load correspondence table for product market matching
-# correspondence_table <- readxl::read_excel("/gti/tmp/_UNDP/Utility_datasets/Product_codes/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Server PATH
+# correspondence_table <- readxl::read_excel("/gti/tmp/ProACT/Utility_datasets/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Server PATH
 correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Dani local path
 correspondence_table <- as.data.table(correspondence_table)
 
 # Load indicator short names for labeling
-# indicator_labels <- readxl::read_excel("/gti/tmp/_ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
+# indicator_labels <- readxl::read_excel("/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
 indicator_labels <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
 indicator_labels <- as.data.table(indicator_labels)
 setnames(indicator_labels, make.names(names(indicator_labels))) # Clean column names
 
 # Load indicator names lookup table
-# ind_names_lookup <- readxl::read_excel("/gti/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Server PATH
+# ind_names_lookup <- readxl::read_excel(""/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
 ind_names_lookup <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
 ind_names_lookup <- as.data.table(ind_names_lookup)
 setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace spaces with underscores in column names
