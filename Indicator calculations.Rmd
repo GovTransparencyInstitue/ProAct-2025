@@ -16,20 +16,6 @@ library(janitor)
 # --------------------------------------------------
 # country_data()
 # --------------------------------------------------
-# Loads a single country procurement dataset.
-#
-# Design choice:
-# - Exactly one country is loaded per execution to avoid cross-country
-#   dependencies and reduce memory usage.
-# - File naming convention is assumed to be <COUNTRY>_export.csv.
-#
-# Args:
-#   country_code : ISO-like country code (e.g. "AT", "DE")
-#   data_dir     : Directory containing country export files
-#
-# Returns:
-#   data.table with contract-level procurement data for one country
-
 
 country_data <- function(country_code, data_dir) {
   file_path <- file.path(data_dir, paste0(country_code, "_export.csv"))
