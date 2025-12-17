@@ -35,12 +35,6 @@ setnames(iso_matcher, tolower(names(iso_matcher)))
 correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Dani local path
 correspondence_table <- as.data.table(correspondence_table)
 
-# Load indicator short names for labeling
-# indicator_labels <- readxl::read_excel("/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
-indicator_labels <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
-indicator_labels <- as.data.table(indicator_labels)
-setnames(indicator_labels, make.names(names(indicator_labels))) # Clean column names
-
 # Load indicator names lookup table
 # ind_names_lookup <- readxl::read_excel(""/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx") # Server PATH
 ind_names_lookup <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
@@ -102,29 +96,6 @@ list_of_indicators_new <- c(
   "ind_econ_buyer_concentration",
   "ind_impl_cost_overrun",
   "ind_impl_time_overrun"
-)
-
-# Old indicators list
-list_of_indicators_old <- c(
-  "ind_corr_nocft",
-  "ind_corr_singleb",
-  "ind_corr_taxhaven",
-  "ind_corr_dec_period",
-  "ind_corr_nonopen_proc_method",
-  "ind_corr_subm_period",
-  "ind_corr_benfords",
-  "ind_winner_share",
-  "ind_tr_title_missing",
-  "ind_tr_bidder_name_missing",
-  "ind_tr_tender_supplytype_missing",
-  "ind_tr_bid_price_missing",
-  "ind_tr_impl_loc_missing",
-  "ind_tr_proc__method_missing",
-  "ind_tr_bids_nr_missing",
-  "ind_tr_aw_date_missing",
-  "ind_comp_bids_count",
-  "ind_comp_bidder_mkt_entry",
-  "ind_comp_bidder_non_local"
 )
 
 # Set active indicators list
