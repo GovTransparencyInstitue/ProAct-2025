@@ -1,9 +1,4 @@
 ## ---- ProACT Indicator Pipeline ---- ##
-## Purpose:
-## This script defines country-agnostic indicator formulas for public procurement
-## transparency and openness. Indicators are designed to be applied one country
-## at a time using harmonised ProACT-style contract-level datasets.
-
 
 data_dir <- "/var/tmp/ivana"   
 
