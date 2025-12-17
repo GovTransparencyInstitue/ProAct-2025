@@ -1,17 +1,14 @@
----
-title: "Indicator calculations"
-output: html_notebook
----
+## ---- ProACT Indicator Pipeline ---- ##
+## Purpose:
+## This script defines country-agnostic indicator formulas for public procurement
+## transparency and openness. Indicators are designed to be applied one country
+## at a time using harmonised ProACT-style contract-level datasets.
 
 
-```{r}
+data_dir <- "/var/tmp/ivana"   
 
-setwd("/var/tmp/ivana")
 
-```
-
-```{r}
-
+##Packages###
 library(data.table)    
 library(dplyr)         
 library(stringr)       
@@ -21,607 +18,625 @@ library(readr)
 library(janitor)   
 
 
-```
+# --------------------------------------------------
+# country_data()
+# --------------------------------------------------
+# Loads a single country procurement dataset.
+#
+# Design choice:
+# - Exactly one country is loaded per execution to avoid cross-country
+#   dependencies and reduce memory usage.
+# - File naming convention is assumed to be <COUNTRY>_export.csv.
+#
+# Args:
+#   country_code : ISO-like country code (e.g. "AT", "DE")
+#   data_dir     : Directory containing country export files
+#
+# Returns:
+#   data.table with contract-level procurement data for one country
 
 
-```{r}
-
-files <- list.files(pattern = "\\.csv$", full.names = TRUE)
-
-datasets <- lapply(files, function(f) {
-  fread(
-    f,
+country_data <- function(country_code, data_dir) {
+  file_path <- file.path(data_dir, paste0(country_code, "_export.csv"))
+  dt <- fread(
+    file_path,
     keepLeadingZeros = TRUE,
     encoding = "UTF-8",
-    stringsAsFactors = FALSE,
-    showProgress = TRUE,
     na.strings = c("", "-", "NA")
   )
-})
-
-names(datasets) <- sub("\\.csv$", "", basename(files))
-
-```
-
-# Austria: test
-
-```{r}
-
-dt <- datasets[["AT_export"]]
-
-```
-
-
-## Transparency group
-
-```{r}
-
-# 1 if non-missing and non-empty string, otherwise 0
-present01 <- function(x) {
-  as.integer(!is.na(x) & x != "")
+  return(dt)
 }
 
 
-```
+# --------------------------------------------------
+# Transparency indicators
+# --------------------------------------------------
+# - Most indicators apply to all awarded contracts.
+# - Selected indicators are restricted to competitive procedures
+# In all indicators: 1 = value is present in the dataset
 
 
-### Sample restriction: All awarded contracts
+vars_exist <- function(dt, vars) {
+  all(vars %in% names(dt))
+}
 
-```{r}
-
-## Procedure type
-# 1 = procedure type present
-dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
-
-## Buyer ID
-# 1 = buyer ID present
-dt[, ind_tr_buyer_id       := present01(buyer_id)]
-
-## Supplier ID
-# 1 = supplier ID present
-dt[, ind_tr_supplier_id    := present01(bidder_id)]
-
-## Award notice publication date
-# 1 = Award notice publication date present
-dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
-
-# Buyer location: city OR postcode OR NUTS 
-# 1 = Buyer location present (city OR postcode OR NUTS code)
-dt[, ind_tr_buyer_loc :=
-      fifelse(
-        (!is.na(buyer_city)     & buyer_city     != "") |
-        (!is.na(buyer_postcode) & buyer_postcode != "") |
-        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
-        1L, 0L
-      )]
-
-# Supplier location
-dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
-                                    as.integer(bidder_nuts != ""))]
-
-
-
-## Implementation location
-# 1 = Implementation location present
-dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
-
-
-## Contract value
-# 1 = Contract value present
-dt[, ind_tr_contract_value      := present01(bid_priceusd)]
-
-
-
-```
-
-
-### Sample restriction: Only competitive purchases (open and restricted)
-
-```{r}
-
-dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
-
-# Call for tenders publication date (Integrity red flag)
-# 1 = Call for tenders date present (only competitive tenders)
-dt[, ind_tr_call_pub := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
-]
-
-# Bids submission deadline date
-# 1 = Bid submission deadline date present (only competitive tenders)
-dt[, ind_tr_bid_deadline := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
-]
-
-# Bids opening date
-# 1 = Notice URL present (only competitive tenders)
-dt[, ind_tr_bid_opening := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_bid_opening :=
-     as.integer(
-       present01(notice_url)
-     )]
-
-```
-
-
-### Product code
-
-```{r}
-
-# Product code
-# 1 = Valid lot product code
-# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
-dt[, ind_tr_prod_code := as.integer(
-  !is.na(lot_productcode) &
-  lot_productcode != "" &
-  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
-)]
-
-```
-
-
-## Openness group
-
-```{r}
-
-# Open procedure share
-# 1 = Award was made through open procedure
-dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
-
-# Non-open procedure share
-# 1 = Award was made through a non-open procedure
-nonopen_methods <- c(
-  "NEGOTIATED",
-  "NEGOTIATED_WITH_PUBLICATION",
-  "NEGOTIATED_WITHOUT_PUBLICATION",
-  "OUTRIGHT_AWARD",
-  "APPROACHING_BIDDERS"
-)
-
-dt[, ind_op_nonopen_proc :=
-      fifelse(is.na(tender_proceduretype), NA_integer_,
-      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
-
-```
-
-
-```{r}
-
-# Advertisement period in days (only in competitive tenders)
-dt[, ind_op_adv_period := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_op_adv_period :=
-     as.integer(
-       as.numeric(
-         tender_biddeadline - tender_publications_firstcallfortenderdate,
-         units = "days"
-       )
-     )]
-
-## Removing implausible values
-dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
-   ind_op_adv_period := NA_integer_]
-
-
-# Short advertisement period flag
-# 1 = adv period < 15 days 
-dt[, ind_op_short_adv_flag := NA_integer_]
-
-dt[, adv_period :=
-     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
-                units = "days")]
-
-dt[competitive == 1 &
-     adv_period >= 0 & adv_period <= 1095,
-   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
-
-dt[, adv_period := NULL]
-
-
-
-
-```
-
-
-
-```{r}
-
-fwrite(dt, "/var/tmp/ivana/Export1/AT_export.csv")
-
-
-```
-
-
-# Belgium: test
-
-```{r}
-
-dt <- datasets[["BE_export"]]
-
-```
-
-
-## Transparency group
-
-```{r}
-
-# 1 if non-missing and non-empty string, otherwise 0
 present01 <- function(x) {
-  as.integer(!is.na(x) & x != "")
+  as.integer(
+    !is.na(x) &
+      trimws(as.character(x)) != ""
+  )
+}
+
+calc_transparency_indicators <- function(dt) {
+  
+  ## -------------------------
+  ## All awarded contracts
+  ## -------------------------
+  
+  vars_all_awarded <- c(
+    "tender_proceduretype",
+    "buyer_id",
+    "bidder_id",
+    "tender_publications_firstdcontractawarddate",
+    "buyer_city",
+    "buyer_postcode",
+    "buyer_nuts",
+    "bidder_nuts",
+    "tender_addressofimplementation_nuts",
+    "bid_priceusd"
+  )
+  
+  if (!vars_exist(dt, vars_all_awarded)) {
+    
+    # If any required variable is missing, transparency is zero by definition
+    dt[, c(
+      "ind_tr_proc_type",
+      "ind_tr_buyer_id",
+      "ind_tr_supplier_id",
+      "ind_tr_award_pub",
+      "ind_tr_buyer_loc",
+      "ind_tr_supplier_loc",
+      "ind_tr_impl_loc",
+      "ind_tr_contract_value"
+    ) := 0L]
+    
+  } else {
+    
+    dt[, ind_tr_proc_type   := present01(tender_proceduretype)]
+    dt[, ind_tr_buyer_id    := present01(buyer_id)]
+    dt[, ind_tr_supplier_id := present01(bidder_id)]
+    
+    dt[, ind_tr_award_pub :=
+         present01(as.character(tender_publications_firstdcontractawarddate))]
+    
+    dt[, ind_tr_buyer_loc :=
+         fifelse(
+           (!is.na(buyer_city)     & buyer_city     != "") |
+             (!is.na(buyer_postcode) & buyer_postcode != "") |
+             (!is.na(buyer_nuts)     & buyer_nuts     != ""),
+           1L, 0L
+         )]
+    
+    dt[, ind_tr_supplier_loc :=
+         fifelse(is.na(bidder_nuts), 0L,
+                 as.integer(bidder_nuts != ""))]
+    
+    dt[, ind_tr_impl_loc := present01(tender_addressofimplementation_nuts)]
+    dt[, ind_tr_contract_value := present01(bid_priceusd)]
+  }
+  
+  
+  ## -------------------------
+  ## Competitive procedures only
+  ## -------------------------
+  
+  vars_competitive <- c(
+    "tender_proceduretype",
+    "tender_publications_firstcallfortenderdate",
+    "tender_biddeadline",
+    "notice_url"
+  )
+  
+  if (!vars_exist(dt, vars_competitive)) {
+    
+    # No competitive transparency information available
+    dt[, c(
+      "ind_tr_call_pub",
+      "ind_tr_bid_deadline",
+      "ind_tr_bid_opening"
+    ) := 0L]
+    
+  } else {
+    
+    dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
+    
+    dt[, ind_tr_call_pub := 0L]
+    dt[competitive == TRUE,
+       ind_tr_call_pub :=
+         fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
+    ]
+    
+    dt[, ind_tr_bid_deadline := 0L]
+    dt[competitive == TRUE,
+       ind_tr_bid_deadline :=
+         fifelse(!is.na(tender_biddeadline), 1L, 0L)
+    ]
+    
+    dt[, ind_tr_bid_opening := 0L]
+    dt[competitive == TRUE,
+       ind_tr_bid_opening := present01(notice_url)
+    ]
+  }
+  
+  
+  ## -------------------------
+  ## Product code
+  ## -------------------------
+  
+  if (!vars_exist(dt, "lot_productcode")) {
+    
+    dt[, ind_tr_prod_code := 0L]
+    
+  } else {
+    
+    dt[, ind_tr_prod_code :=
+         as.integer(
+           !is.na(lot_productcode) &
+             lot_productcode != "" &
+             !(lot_productcode %in% c("99000000", "99100000",
+                                      "99200000", "99300000"))
+         )]
+  }
+  return(dt)
 }
 
 
-```
+# --------------------------------------------------
+# Openness indicators
+# --------------------------------------------------
 
+calc_openness_indicators <- function(dt) {
+  
+  setDT(dt)
+  
+  ## -------------------------
+  ## Procedure type: OPEN
+  ## -------------------------
+  
+  if ("tender_proceduretype" %in% names(dt)) {
+    
+    dt[, ind_op_open_proc :=
+         fifelse(
+           is.na(tender_proceduretype),
+           NA_integer_,
+           as.integer(tender_proceduretype == "OPEN")
+         )
+    ]
+    
+    dt[, competitive :=
+         tender_proceduretype %in% c("OPEN", "RESTRICTED")
+    ]
+    
+  } else {
+    
+    dt[, ind_op_open_proc := NA_integer_]
+    dt[, competitive := FALSE]
+    
+  }
+  
+  ## -------------------------
+  ## Procedure type: NON-OPEN
+  ## (everything except OPEN, NA stays NA)
+  ## -------------------------
+  
+  if ("tender_proceduretype" %in% names(dt)) {
+    
+    dt[, ind_op_nonopen_proc :=
+         fifelse(
+           is.na(tender_proceduretype),
+           NA_integer_,
+           as.integer(tender_proceduretype != "OPEN")
+         )
+    ]
+    
+  } else {
+    
+    dt[, ind_op_nonopen_proc := NA_integer_]
+    
+  }
+  
+  ## -------------------------
+  ## Advertisement period
+  ## (alias of submission period, if available)
+  ## -------------------------
+  
+  if ("submp" %in% names(dt)) {
+    dt[, ind_op_adv_period := as.integer(submp)]
+  } else {
+    dt[, ind_op_adv_period := NA_integer_]
+  }
+  
+  ## -------------------------
+  ## Short advertisement flag
+  ## (submission period < 15 days)
+  ## -------------------------
+  
+  if ("submp" %in% names(dt)) {
+    
+    dt[, ind_op_short_adv_flag :=
+         fifelse(
+           is.na(submp),
+           NA_integer_,
+           as.integer(submp < 15)
+         )
+    ]
+    
+  } else {
+    
+    dt[, ind_op_short_adv_flag := NA_integer_]
+    
+  }
+  
+  return(dt)
+}
 
-### Sample restriction: All awarded contracts
+# --------------------------------------------------
+# COUNTRY LEVEL CALCULATIONS
+# --------------------------------------------------
 
-```{r}
-
-## Procedure type
-# 1 = procedure type present
-dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
-
-## Buyer ID
-# 1 = buyer ID present
-dt[, ind_tr_buyer_id       := present01(buyer_id)]
-
-## Supplier ID
-# 1 = supplier ID present
-dt[, ind_tr_supplier_id    := present01(bidder_id)]
-
-## Award notice publication date
-# 1 = Award notice publication date present
-dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
-
-# Buyer location: city OR postcode OR NUTS 
-# 1 = Buyer location present (city OR postcode OR NUTS code)
-dt[, ind_tr_buyer_loc :=
-      fifelse(
-        (!is.na(buyer_city)     & buyer_city     != "") |
-        (!is.na(buyer_postcode) & buyer_postcode != "") |
-        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
-        1L, 0L
-      )]
-
-# Supplier location
-dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
-                                    as.integer(bidder_nuts != ""))]
-
-
-
-## Implementation location
-# 1 = Implementation location present
-dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
-
-
-## Contract value
-# 1 = Contract value present
-dt[, ind_tr_contract_value      := present01(bid_priceusd)]
-
-
-
-```
-
-
-### Sample restriction: Only competitive purchases (open and restricted)
-
-```{r}
-
-dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
-
-# Call for tenders publication date (Integrity red flag)
-# 1 = Call for tenders date present (only competitive tenders)
-dt[, ind_tr_call_pub := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
-]
-
-# Bids submission deadline date
-# 1 = Bid submission deadline date present (only competitive tenders)
-dt[, ind_tr_bid_deadline := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
-]
-
-# Bids opening date
-# 1 = Notice URL present (only competitive tenders)
-dt[, ind_tr_bid_opening := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_bid_opening :=
-     as.integer(
-       present01(notice_url)
-     )]
-
-```
-
-
-### Product code
-
-```{r}
-
-# Product code
-# 1 = Valid lot product code
-# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
-dt[, ind_tr_prod_code := as.integer(
-  !is.na(lot_productcode) &
-  lot_productcode != "" &
-  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
-)]
-
-```
-
-
-## Openness group
-
-```{r}
-
-# Open procedure share
-# 1 = Award was made through open procedure
-dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
-
-# Non-open procedure share
-# 1 = Award was made through a non-open procedure
-nonopen_methods <- c(
-  "NEGOTIATED",
-  "NEGOTIATED_WITH_PUBLICATION",
-  "NEGOTIATED_WITHOUT_PUBLICATION",
-  "OUTRIGHT_AWARD",
-  "APPROACHING_BIDDERS"
+IND_TR_VARS <- c(
+  "ind_tr_proc_type",
+  "ind_tr_buyer_id",
+  "ind_tr_supplier_id",
+  "ind_tr_award_pub",
+  "ind_tr_buyer_loc",
+  "ind_tr_supplier_loc",
+  "ind_tr_impl_loc",
+  "ind_tr_contract_value",
+  "ind_tr_call_pub",
+  "ind_tr_bid_deadline",
+  "ind_tr_bid_opening",
+  "ind_tr_prod_code"
 )
 
-dt[, ind_op_nonopen_proc :=
-      fifelse(is.na(tender_proceduretype), NA_integer_,
-      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
+IND_OP_VARS <- c(
+  "ind_op_open_proc",
+  "ind_op_nonopen_proc",
+  "ind_op_adv_period",
+  "ind_op_short_adv_flag"
+)
 
-```
-
-
-```{r}
-
-# Advertisement period in days (only in competitive tenders)
-dt[, ind_op_adv_period := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_op_adv_period :=
-     as.integer(
-       as.numeric(
-         tender_biddeadline - tender_publications_firstcallfortenderdate,
-         units = "days"
-       )
-     )]
-
-## Removing implausible values
-dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
-   ind_op_adv_period := NA_integer_]
-
-
-# Short advertisement period flag
-# 1 = adv period < 15 days 
-dt[, ind_op_short_adv_flag := NA_integer_]
-
-dt[, adv_period :=
-     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
-                units = "days")]
-
-dt[competitive == 1 &
-     adv_period >= 0 & adv_period <= 1095,
-   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
-
-dt[, adv_period := NULL]
-
-
-
-
-```
-
-
-
-```{r}
-
-fwrite(dt, "/var/tmp/ivana/Export1/BE_export.csv")
-
-
-```
-
-# Czech Republic: test
-
-```{r}
-
-dt <- datasets[["CZ_export"]]
-
-```
-
-
-## Transparency group
-
-```{r}
-
-# 1 if non-missing and non-empty string, otherwise 0
-present01 <- function(x) {
-  as.integer(!is.na(x) & x != "")
+run_country <- function(cc, data_dir) {
+  
+  dt <- country_data(country_code = cc, data_dir = data_dir)
+  setDT(dt)
+  
+  dt <- calc_openness_indicators(dt)
+  dt <- calc_transparency_indicators(dt)
+  
+  list(
+    data = dt,
+    tables_tr = setNames(
+      lapply(IND_TR_VARS, function(v) table(dt[[v]], useNA = "ifany")),
+      IND_TR_VARS
+    ),
+    tables_op = setNames(
+      lapply(IND_OP_VARS, function(v) table(dt[[v]], useNA = "ifany")),
+      IND_OP_VARS
+    )
+  )
 }
 
 
-```
+# --------------------------------------------------
+# Countries
+# --------------------------------------------------
+
+# Armenia
+am <- run_country("AM", data_dir)
+dt_am <- am$data
+tables_tr_am <- am$tables_tr
+tables_op_am <- am$tables_op
+
+# Austria
+at <- run_country("AT", data_dir)
+dt_at <- at$data
+tables_tr_at <- at$tables_tr
+tables_op_at <- at$tables_op
+
+# Belgium
+be <- run_country("BE", data_dir)
+dt_be <- be$data
+tables_tr_be <- be$tables_tr
+tables_op_be <- be$tables_op
+
+# Bulgaria
+bg <- run_country("BG", data_dir)
+dt_bg <- bg$data
+tables_tr_bg <- bg$tables_tr
+tables_op_bg <- bg$tables_op
+
+# Switzerland
+ch <- run_country("CH", data_dir)
+dt_ch <- ch$data
+tables_tr_ch <- ch$tables_tr
+tables_op_ch <- ch$tables_op
+
+# Chile
+cl <- run_country("CL", data_dir)
+dt_cl <- cl$data
+tables_tr_cl <- cl$tables_tr
+tables_op_cl <- cl$tables_op
+
+# Colombia
+co <- run_country("CO", data_dir)
+dt_co <- co$data
+tables_tr_co <- co$tables_tr
+tables_op_co <- co$tables_op
+
+# Cyprus
+cy <- run_country("CY", data_dir)
+dt_cy <- cy$data
+tables_tr_cy <- cy$tables_tr
+tables_op_cy <- cy$tables_op
+
+# Czech Republic
+cz <- run_country("CZ", data_dir)
+dt_cz <- cz$data
+tables_tr_cz <- cz$tables_tr
+tables_op_cz <- cz$tables_op
+
+# Germany
+de <- run_country("DE", data_dir)
+dt_de <- de$data
+tables_tr_de <- de$tables_tr
+tables_op_de <- de$tables_op
+
+# Denmark
+dk <- run_country("DK", data_dir)
+dt_dk <- dk$data
+tables_tr_dk <- dk$tables_tr
+tables_op_dk <- dk$tables_op
+
+# Estonia
+ee <- run_country("EE", data_dir)
+dt_ee <- ee$data
+tables_tr_ee <- ee$tables_tr
+tables_op_ee <- ee$tables_op
+
+# Spain
+es <- run_country("ES", data_dir)
+dt_es <- es$data
+tables_tr_es <- es$tables_tr
+tables_op_es <- es$tables_op
+
+# Finland
+fi <- run_country("FI", data_dir)
+dt_fi <- fi$data
+tables_tr_fi <- fi$tables_tr
+tables_op_fi <- fi$tables_op
+
+# France
+fr <- run_country("FR", data_dir)
+dt_fr <- fr$data
+tables_tr_fr <- fr$tables_tr
+tables_op_fr <- fr$tables_op
+
+# Georgia
+ge <- run_country("GE", data_dir)
+dt_ge <- ge$data
+tables_tr_ge <- ge$tables_tr
+tables_op_ge <- ge$tables_op
+
+# Greece
+gr <- run_country("GR", data_dir)
+dt_gr <- gr$data
+tables_tr_gr <- gr$tables_tr
+tables_op_gr <- gr$tables_op
+
+# Croatia
+hr <- run_country("HR", data_dir)
+dt_hr <- hr$data
+tables_tr_hr <- hr$tables_tr
+tables_op_hr <- hr$tables_op
+
+# Hungary
+hu <- run_country("HU", data_dir)
+dt_hu <- hu$data
+tables_tr_hu <- hu$tables_tr
+tables_op_hu <- hu$tables_op
+
+# Indonesia
+id <- run_country("ID", data_dir)
+dt_id <- id$data
+tables_tr_id <- id$tables_tr
+tables_op_id <- id$tables_op
+
+# Ireland
+ie <- run_country("IE", data_dir)
+dt_ie <- ie$data
+tables_tr_ie <- ie$tables_tr
+tables_op_ie <- ie$tables_op
+
+# India
+in_ <- run_country("IN", data_dir)
+dt_in <- in_$data
+tables_tr_in <- in_$tables_tr
+tables_op_in <- in_$tables_op
+
+# Iceland
+is_ <- run_country("IS", data_dir)
+dt_is <- is_$data
+tables_tr_is <- is_$tables_tr
+tables_op_is <- is_$tables_op
+
+# Italy
+it <- run_country("IT", data_dir)
+dt_it <- it$data
+tables_tr_it <- it$tables_tr
+tables_op_it <- it$tables_op
+
+# Jamaica
+jm <- run_country("JM", data_dir)
+dt_jm <- jm$data
+tables_tr_jm <- jm$tables_tr
+tables_op_jm <- jm$tables_op
+
+# Kenya
+ke <- run_country("KE", data_dir)
+dt_ke <- ke$data
+tables_tr_ke <- ke$tables_tr
+tables_op_ke <- ke$tables_op
+
+# Lithuania
+lt <- run_country("LT", data_dir)
+dt_lt <- lt$data
+tables_tr_lt <- lt$tables_tr
+tables_op_lt <- lt$tables_op
+
+# Luxembourg
+lu <- run_country("LU", data_dir)
+dt_lu <- lu$data
+tables_tr_lu <- lu$tables_tr
+tables_op_lu <- lu$tables_op
+
+# Latvia
+lv <- run_country("LV", data_dir)
+dt_lv <- lv$data
+tables_tr_lv <- lv$tables_tr
+tables_op_lv <- lv$tables_op
+
+# Moldova
+md <- run_country("MD", data_dir)
+dt_md <- md$data
+tables_tr_md <- md$tables_tr
+tables_op_md <- md$tables_op
+
+# North Macedonia
+mk <- run_country("MK", data_dir)
+dt_mk <- mk$data
+tables_tr_mk <- mk$tables_tr
+tables_op_mk <- mk$tables_op
+
+# Malta
+mt <- run_country("MT", data_dir)
+dt_mt <- mt$data
+tables_tr_mt <- mt$tables_tr
+tables_op_mt <- mt$tables_op
+
+# Mexico
+mx <- run_country("MX", data_dir)
+dt_mx <- mx$data
+tables_tr_mx <- mx$tables_tr
+tables_op_mx <- mx$tables_op
+
+# Netherlands
+nl <- run_country("NL", data_dir)
+dt_nl <- nl$data
+tables_tr_nl <- nl$tables_tr
+tables_op_nl <- nl$tables_op
+
+# Norway
+no <- run_country("NO", data_dir)
+dt_no <- no$data
+tables_tr_no <- no$tables_tr
+tables_op_no <- no$tables_op
+
+# Poland
+pl <- run_country("PL", data_dir)
+dt_pl <- pl$data
+tables_tr_pl <- pl$tables_tr
+tables_op_pl <- pl$tables_op
+
+# Portugal
+pt <- run_country("PT", data_dir)
+dt_pt <- pt$data
+tables_tr_pt <- pt$tables_tr
+tables_op_pt <- pt$tables_op
+
+# Paraguay
+py <- run_country("PY", data_dir)
+dt_py <- py$data
+tables_tr_py <- py$tables_tr
+tables_op_py <- py$tables_op
+
+# Romania
+ro <- run_country("RO", data_dir)
+dt_ro <- ro$data
+tables_tr_ro <- ro$tables_tr
+tables_op_ro <- ro$tables_op
+
+# Sweden
+se <- run_country("SE", data_dir)
+dt_se <- se$data
+tables_tr_se <- se$tables_tr
+tables_op_se <- se$tables_op
+
+# Slovenia
+si <- run_country("SI", data_dir)
+dt_si <- si$data
+tables_tr_si <- si$tables_tr
+tables_op_si <- si$tables_op
+
+# Slovakia
+sk <- run_country("SK", data_dir)
+dt_sk <- sk$data
+tables_tr_sk <- sk$tables_tr
+tables_op_sk <- sk$tables_op
+
+# Uganda
+ug <- run_country("UG", data_dir)
+dt_ug <- ug$data
+tables_tr_ug <- ug$tables_tr
+tables_op_ug <- ug$tables_op
+
+# United Kingdom
+uk <- run_country("UK", data_dir)
+dt_uk <- uk$data
+tables_tr_uk <- uk$tables_tr
+tables_op_uk <- uk$tables_op
+
+# United States
+us <- run_country("US", data_dir)
+dt_us <- us$data
+tables_tr_us <- us$tables_tr
+tables_op_us <- us$tables_op
+
+# Uruguay
+uy <- run_country("UY", data_dir)
+dt_uy <- uy$data
+tables_tr_uy <- uy$tables_tr
+tables_op_uy <- uy$tables_op
 
 
-### Sample restriction: All awarded contracts
 
-```{r}
+# --------------------------------------------------
+# Export
+# --------------------------------------------------
 
-## Procedure type
-# 1 = procedure type present
-dt[, ind_tr_proc_type      := present01(tender_proceduretype)]
-
-## Buyer ID
-# 1 = buyer ID present
-dt[, ind_tr_buyer_id       := present01(buyer_id)]
-
-## Supplier ID
-# 1 = supplier ID present
-dt[, ind_tr_supplier_id    := present01(bidder_id)]
-
-## Award notice publication date
-# 1 = Award notice publication date present
-dt[, ind_tr_award_pub := present01(as.character(tender_publications_firstdcontractawarddate))]
-
-# Buyer location: city OR postcode OR NUTS 
-# 1 = Buyer location present (city OR postcode OR NUTS code)
-dt[, ind_tr_buyer_loc :=
-      fifelse(
-        (!is.na(buyer_city)     & buyer_city     != "") |
-        (!is.na(buyer_postcode) & buyer_postcode != "") |
-        (!is.na(buyer_nuts)     & buyer_nuts     != ""),
-        1L, 0L
-      )]
-
-# Supplier location
-dt[, ind_tr_supplier_loc := fifelse(is.na(bidder_nuts), 0L,
-                                    as.integer(bidder_nuts != ""))]
+export_dir <- "/var/tmp/ivana/Export 2"
+dir.create(export_dir, recursive = TRUE, showWarnings = FALSE)
 
 
-
-## Implementation location
-# 1 = Implementation location present
-dt[, ind_tr_impl_loc      := present01(tender_addressofimplementation_nuts)]
-
-
-## Contract value
-# 1 = Contract value present
-dt[, ind_tr_contract_value      := present01(bid_priceusd)]
-
-
-
-```
-
-
-### Sample restriction: Only competitive purchases (open and restricted)
-
-```{r}
-
-dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
-
-# Call for tenders publication date (Integrity red flag)
-# 1 = Call for tenders date present (only competitive tenders)
-dt[, ind_tr_call_pub := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_call_pub := fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
-]
-
-# Bids submission deadline date
-# 1 = Bid submission deadline date present (only competitive tenders)
-dt[, ind_tr_bid_deadline := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_tr_bid_deadline := fifelse(!is.na(tender_biddeadline), 1L, 0L)
-]
-
-# Bids opening date
-# 1 = Notice URL present (only competitive tenders)
-dt[, ind_tr_bid_opening := NA_integer_]
-dt[competitive == TRUE,
-   ind_tr_bid_opening :=
-     as.integer(
-       present01(notice_url)
-     )]
-
-```
-
-
-### Product code
-
-```{r}
-
-# Product code
-# 1 = Valid lot product code
-# 0 = Missing OR uncategorized CPV (99000000, 99100000, 99200000, 99300000)
-dt[, ind_tr_prod_code := as.integer(
-  !is.na(lot_productcode) &
-  lot_productcode != "" &
-  !(lot_productcode %in% c("99000000", "99100000", "99200000", "99300000"))
-)]
-
-```
-
-
-## Openness group
-
-```{r}
-
-# Open procedure share
-# 1 = Award was made through open procedure
-dt[, ind_op_open_proc := as.integer(tender_proceduretype == "OPEN")]
-
-# Non-open procedure share
-# 1 = Award was made through a non-open procedure
-nonopen_methods <- c(
-  "NEGOTIATED",
-  "NEGOTIATED_WITH_PUBLICATION",
-  "NEGOTIATED_WITHOUT_PUBLICATION",
-  "OUTRIGHT_AWARD",
-  "APPROACHING_BIDDERS"
+country_codes <- c(
+  "AM","AT","BE","BG","CH","CL","CO","CY","CZ","DE","DK","EE","ES","FI","FR",
+  "GE","GR","HR","HU","ID","IE","IN","IS","IT","JM","KE","LT","LU","LV","MD",
+  "MK","MT","MX","NL","NO","PL","PT","PY","RO","SE","SI","SK","UG","UK","US","UY"
 )
 
-dt[, ind_op_nonopen_proc :=
-      fifelse(is.na(tender_proceduretype), NA_integer_,
-      fifelse(tender_proceduretype %in% nonopen_methods, 1L, 0L))]
 
-```
+for (cc in country_codes) {
+  
+  message("Exporting country: ", cc)
+  
+  res <- run_country(cc, data_dir)
+  dt  <- res$data
+  
+  out_file <- file.path(export_dir, paste0(cc, "_export.csv"))
+  
+  fwrite(dt, out_file)
+}
 
-
-```{r}
-
-# Advertisement period in days (only in competitive tenders)
-dt[, ind_op_adv_period := NA_integer_]
-
-dt[competitive == TRUE,
-   ind_op_adv_period :=
-     as.integer(
-       as.numeric(
-         tender_biddeadline - tender_publications_firstcallfortenderdate,
-         units = "days"
-       )
-     )]
-
-## Removing implausible values
-dt[ind_op_adv_period < 0 | ind_op_adv_period > 1095,
-   ind_op_adv_period := NA_integer_]
-
-
-# Short advertisement period flag
-# 1 = adv period < 15 days 
-dt[, ind_op_short_adv_flag := NA_integer_]
-
-dt[, adv_period :=
-     as.numeric(tender_biddeadline - tender_publications_firstcallfortenderdate,
-                units = "days")]
-
-dt[competitive == 1 &
-     adv_period >= 0 & adv_period <= 1095,
-   ind_op_short_adv_flag := fifelse(adv_period < 15, 1L, 0L)]
-
-dt[, adv_period := NULL]
-
-
-
-
-```
-
-
-
-```{r}
-
-fwrite(dt, "/var/tmp/ivana/Export1/CZ_export.csv")
-
-
-```
 
 
 
