@@ -304,3 +304,304 @@ write.csv(
 
 ```
 
+Procedure type: counts
+
+```{r}
+
+procedure_counts <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    dt <- as.data.table(datasets[[nm]])
+    dt[, .N, by = tender_proceduretype][, dataset := nm]
+  }),
+  fill = TRUE
+)
+
+procedure_counts
+
+procedure_counts[
+  is.na(tender_proceduretype) | tender_proceduretype == "",
+  tender_proceduretype := "UNKNOWN"
+]
+
+
+procedure_wide <- dcast(
+  procedure_counts,
+  dataset ~ tender_proceduretype,
+  value.var = "N",
+  fill = 0
+)
+
+fwrite(
+  procedure_wide,
+  file = "/var/tmp/ivana/tender_proceduretype_counts.csv"
+)
+
+```
+
+# Decision period
+
+```{r}
+
+decp_summary <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    # If decp does not exist, return NA row
+    if (!"decp" %in% names(dt)) {
+      return(data.table(
+        dataset = nm,
+        missing_rate = NA_real_,
+        min = NA_real_,
+        mean = NA_real_,
+        max = NA_real_
+      ))
+    }
+    
+    data.table(
+      dataset = nm,
+      missing_rate = mean(is.na(dt$decp)),
+      min  = suppressWarnings(min(dt$decp, na.rm = TRUE)),
+      mean = suppressWarnings(mean(dt$decp, na.rm = TRUE)),
+      max  = suppressWarnings(max(dt$decp, na.rm = TRUE))
+    )
+  }),
+  fill = TRUE
+)
+
+decp_summary[
+  is.infinite(min),  min  := NA_real_
+][
+  is.infinite(max),  max  := NA_real_
+]
+
+
+fwrite(
+  decp_summary,
+  file = "/var/tmp/ivana/decp_missing_and_distribution.csv"
+)
+
+
+```
+
+# ind_tr_bids_nr_missing = 0
+
+```{r}
+
+library(data.table)
+
+ind_tr_missing0_counts <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    if (!"ind_tr_bids_nr_missing" %in% names(dt)) {
+      return(data.table(
+        dataset = nm,
+        n_ind_tr_missing0 = 0L
+      ))
+    }
+    
+    data.table(
+      dataset = nm,
+      n_ind_tr_missing0 = sum(dt$ind_tr_bids_nr_missing == 0, na.rm = TRUE)
+    )
+  }),
+  fill = TRUE
+)
+
+
+ind_tr_missing0_counts[, n_total :=
+  sapply(datasets, nrow)
+]
+
+fwrite(
+  ind_tr_missing0_counts,
+  file = "/var/tmp/ivana/ind_tr_bids_nr_missing0_counts.csv"
+)
+
+
+
+```
+
+
+#Single bid
+
+```{r}
+
+
+singleb_missing_summary <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    # Variable does not exist at all
+    if (!"ind_corr_singleb" %in% names(dt)) {
+      return(data.table(
+        dataset = nm,
+        n_missing_singleb = nrow(dt),
+        missing_rate_singleb = 1
+      ))
+    }
+    
+    data.table(
+      dataset = nm,
+      n_missing_singleb = sum(is.na(dt$ind_corr_singleb)),
+      missing_rate_singleb = mean(is.na(dt$ind_corr_singleb))
+    )
+  }),
+  fill = TRUE
+)
+
+singleb_missing_summary[, n_total :=
+  sapply(datasets, nrow)
+]
+
+singleb_missing_summary[, n_nonmissing_singleb :=
+  n_total - n_missing_singleb
+]
+
+
+
+fwrite(
+  singleb_missing_summary,
+  file = "/var/tmp/ivana/ind_corr_singleb_missingness.csv"
+)
+
+
+```
+
+# Tax haven
+
+```{r}
+
+taxhaven_missing_summary <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    # Variable not present ? keep missing_rate empty (NA)
+    if (!"ind_corr_taxhaven" %in% names(dt)) {
+      return(data.table(
+        dataset = nm,
+        missing_rate_ind_corr_taxhaven = NA_real_
+      ))
+    }
+    
+    # Variable present ? compute missing rate
+    data.table(
+      dataset = nm,
+      missing_rate_ind_corr_taxhaven =
+        mean(is.na(dt$ind_corr_taxhaven))
+    )
+  }),
+  fill = TRUE
+)
+
+fwrite(
+  taxhaven_missing_summary,
+  file = "/var/tmp/ivana/ind_corr_taxhaven_missing_rate.csv"
+)
+
+
+```
+
+
+#Sectors
+
+```{r}
+
+library(data.table)
+
+lot_productcode_counts <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    if (!"lot_productcode" %in% names(dt)) {
+      return(NULL)
+    }
+    
+    dt[
+      , .N, by = lot_productcode
+    ][
+      , dataset := nm
+    ]
+  }),
+  fill = TRUE
+)
+
+
+
+lot_productcode_counts[
+  is.na(lot_productcode) | lot_productcode == "",
+  lot_productcode := "UNKNOWN"
+]
+
+
+
+lot_productcode_wide <- dcast(
+  lot_productcode_counts,
+  dataset ~ lot_productcode,
+  value.var = "N",
+  fill = 0
+)
+
+fwrite(
+  lot_productcode_wide,
+  file = "/var/tmp/ivana/lot_productcode_counts_wide.csv"
+)
+
+
+```
+
+
+#First call for tender
+
+```{r}
+
+firstcall_missing_pct <- rbindlist(
+  lapply(names(datasets), function(nm) {
+    
+    dt <- as.data.table(datasets[[nm]])
+    
+    # Variable not present ? 100% missing
+    if (!"tender_publications_firstcallfortenderdate" %in% names(dt)) {
+      return(data.table(
+        dataset = nm,
+        missing_pct_firstcall = 100
+      ))
+    }
+    
+    data.table(
+      dataset = nm,
+      missing_pct_firstcall =
+        mean(is.na(dt$tender_publications_firstcallfortenderdate)) * 100
+    )
+  }),
+  fill = TRUE
+)
+
+
+fwrite(
+  firstcall_missing_pct,
+  file = "/var/tmp/ivana/tender_firstcall_missingness_pct.csv"
+)
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
