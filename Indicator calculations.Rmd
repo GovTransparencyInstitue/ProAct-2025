@@ -30,7 +30,7 @@ country_data <- function(country_code, data_dir) {
 
 
 # --------------------------------------------------
-# Transparency indicators
+# 1. Transparency indicators
 # --------------------------------------------------
 # - Most indicators apply to all awarded contracts.
 # - Selected indicators are restricted to competitive procedures
@@ -171,9 +171,38 @@ calc_transparency_indicators <- function(dt) {
   return(dt)
 }
 
+  ## -------------------------
+  ## Transparency index
+  ## -------------------------
+
+TR_INDICATOR_VARS <- c(
+  "ind_tr_proc_type",
+  "ind_tr_buyer_id",
+  "ind_tr_supplier_id",
+  "ind_tr_award_pub",
+  "ind_tr_buyer_loc",
+  "ind_tr_supplier_loc",
+  "ind_tr_impl_loc",
+  "ind_tr_contract_value",
+  "ind_tr_call_pub",
+  "ind_tr_bid_deadline",
+  "ind_tr_bid_opening",
+  "ind_tr_prod_code"
+)
+
+  existing_tr_vars <- TR_INDICATOR_VARS[TR_INDICATOR_VARS %in% names(dt)]
+
+  if (length(existing_tr_vars) == 0) {
+    dt[, ind_tr_index := NA_real_]
+  } else {
+    dt[, ind_tr_index := rowMeans(.SD, na.rm = TRUE), .SDcols = existing_tr_vars]
+  }
+
+  return(dt)
+}
 
 # --------------------------------------------------
-# Openness indicators
+# 2. Openness indicators
 # --------------------------------------------------
 
 calc_openness_indicators <- function(dt) {
@@ -261,11 +290,141 @@ calc_openness_indicators <- function(dt) {
   return(dt)
 }
 
+
+# --------------------------------------------------
+# 3. Administrative efficiency indicators
+# --------------------------------------------------
+
+  ## -------------------------
+  ## Decision period
+  ## -------------------------
+
+  if ("decp" %in% names(dt)) {
+    dt[, ind_adm_dec_period := as.integer(decp)]
+  } else {
+    dt[, ind_adm_dec_period := NA_integer_]
+  }
+
+
+  ## -------------------------
+  ## Long decision period flag
+  ## -------------------------
+
+if ("ind_corr_dec_period" %in% names(dt)) {
+
+  dt[, ind_adm_long_dec_flag :=
+       fifelse(
+         is.na(ind_corr_dec_period),
+         NA_integer_,
+         as.integer(ind_corr_dec_period > LONG_DEC_THRESHOLD)
+       )
+  ]
+
+} else {
+
+  dt[, ind_adm_long_dec_flag := NA_integer_]
+
+}
+
+
+# --------------------------------------------------
+# 4. Competition indicators
+# --------------------------------------------------
+
+## -------------------------
+## Average number of bids (alias of bids count)
+## -------------------------
+
+if ("ind_comp_bids_count" %in% names(dt)) {
+  dt[, ind_comp_avg_bids := fifelse(
+    is.na(ind_comp_bids_count),
+    NA_real_,
+    as.numeric(ind_comp_bids_count)
+  )]
+} else {
+  dt[, ind_comp_avg_bids := NA_real_]
+}
+
+## -------------------------
+## Single bidding (alias of corrected single-bid indicator)
+## -------------------------
+
+if ("ind_corr_singleb" %in% names(dt)) {
+  dt[, ind_comp_single_bid := fifelse(
+    is.na(ind_corr_singleb),
+    NA_integer_,
+    as.integer(ind_corr_singleb)
+  )]
+} else {
+  dt[, ind_comp_single_bid := NA_integer_]
+}
+
+
+
+## -------------------------
+## Foreign supplier (1 = bidder_country != buyer_country)
+## -------------------------
+
+if (all(c("bidder_country", "buyer_country") %in% names(dt))) {
+
+  # normalize (trim + uppercase) to avoid false mismatches
+  dt[, buyer_country_clean  := toupper(trimws(as.character(buyer_country)))]
+  dt[, bidder_country_clean := toupper(trimws(as.character(bidder_country)))]
+
+  dt[, ind_comp_foreign_supplier :=
+       fifelse(
+         buyer_country_clean == "" | bidder_country_clean == "",
+         NA_integer_,
+         fifelse(
+           is.na(buyer_country_clean) | is.na(bidder_country_clean),
+           NA_integer_,
+           as.integer(bidder_country_clean != buyer_country_clean)
+         )
+       )
+  ]
+
+## -------------------------
+## Non-local suppliers
+## ind_comp_bidder_non_local
+## -------------------------
+
+
+## -------------------------
+## Tax haven supplier flag (1 = supplier in tax haven)
+## Base: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
+## -------------------------
+
+if ("ind_corr_taxhaven" %in% names(dt)) {
+
+  dt[, ind_comp_tax_haven_suppliers :=
+       fifelse(
+         is.na(ind_corr_taxhaven),
+         NA_integer_,
+         fifelse(ind_corr_taxhaven == 0L,   1L,   # tax haven
+                 fifelse(ind_corr_taxhaven == 100L, 0L, NA_integer_))  # not tax haven
+       )
+  ]
+
+} else {
+
+  dt[, ind_comp_tax_haven_suppliers := NA_integer_]
+
+}
+
+
+# --------------------------------------------------
+# 5. Economic performance & value for money
+# --------------------------------------------------
+
+Sector composition?
+
+
+
 # --------------------------------------------------
 # COUNTRY LEVEL CALCULATIONS
 # --------------------------------------------------
 
-IND_TR_VARS <- c(
+TR_INDICATOR_VARS <- c(
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
   "ind_tr_supplier_id",
@@ -280,12 +439,27 @@ IND_TR_VARS <- c(
   "ind_tr_prod_code"
 )
 
+IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index")
+
 IND_OP_VARS <- c(
   "ind_op_open_proc",
   "ind_op_nonopen_proc",
   "ind_op_adv_period",
   "ind_op_short_adv_flag"
 )
+
+IND_ADM_VARS <- c(
+  "ind_adm_dec_period",
+  "ind_adm_long_dec_flag"
+)
+
+IND_COMP_VARS <- c(
+  "ind_comp_avg_bids",
+  "ind_comp_single_bid",
+  "ind_comp_foreign_supplier",
+  "ind_comp_tax_haven_suppliers"
+)
+
 
 run_country <- function(cc, data_dir) {
   
