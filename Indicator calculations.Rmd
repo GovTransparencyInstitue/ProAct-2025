@@ -6,7 +6,7 @@ data_dir <- "/var/tmp/ivana"
 ##Packages###
 library(data.table)    
 library(dplyr)         
-library(stringr)       
+library(stringr)      
 library(purrr)         
 library(tidyr)
 library(readr)         
