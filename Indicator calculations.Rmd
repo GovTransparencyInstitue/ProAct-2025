@@ -49,374 +49,383 @@ present01 <- function(x) {
 }
 
 calc_transparency_indicators <- function(dt) {
-  
-  ## -------------------------
-  ## All awarded contracts
-  ## -------------------------
-  
-  vars_all_awarded <- c(
-    "tender_proceduretype",
-    "buyer_id",
-    "bidder_id",
-    "tender_publications_firstdcontractawarddate",
-    "buyer_city",
-    "buyer_postcode",
-    "buyer_nuts",
-    "bidder_nuts",
-    "tender_addressofimplementation_nuts",
-    "bid_priceusd"
-  )
-  
-  if (!vars_exist(dt, vars_all_awarded)) {
-    
-    # If any required variable is missing, transparency is zero by definition
-    dt[, c(
-      "ind_tr_proc_type",
-      "ind_tr_buyer_id",
-      "ind_tr_supplier_id",
-      "ind_tr_award_pub",
-      "ind_tr_buyer_loc",
-      "ind_tr_supplier_loc",
-      "ind_tr_impl_loc",
-      "ind_tr_contract_value"
-    ) := 0L]
-    
-  } else {
-    
-    dt[, ind_tr_proc_type   := present01(tender_proceduretype)]
-    dt[, ind_tr_buyer_id    := present01(buyer_id)]
+  setDT(dt)
+
+  # -------------------------
+  # 0) Initialize indicators
+  #   - Most transparency indicators: missing input column => indicator stays 0
+  #   - Benford: missing input column => NA (special case, NOT part of index)
+  # -------------------------
+  dt[, `:=`(
+    ind_tr_proc_type       = 0L,
+    ind_tr_buyer_id        = 0L,
+    ind_tr_supplier_id     = 0L,
+    ind_tr_award_pub       = 0L,
+    ind_tr_buyer_loc       = 0L,
+    ind_tr_supplier_loc    = 0L,
+    ind_tr_impl_loc        = 0L,
+    ind_tr_contract_value  = 0L,
+    ind_tr_call_pub        = 0L,
+    ind_tr_bid_deadline    = 0L,
+    ind_tr_bid_opening     = 0L,
+    ind_tr_prod_code       = 0L,
+    ind_tr_benford         = NA_integer_   # mirrors ind_corr_benfords if present
+  )]
+
+  # -------------------------
+  # 1) All awarded contracts
+  # -------------------------
+  if ("tender_proceduretype" %in% names(dt)) {
+    dt[, ind_tr_proc_type := present01(tender_proceduretype)]
+  }
+
+  if ("buyer_id" %in% names(dt)) {
+    dt[, ind_tr_buyer_id := present01(buyer_id)]
+  }
+
+  if ("bidder_id" %in% names(dt)) {
     dt[, ind_tr_supplier_id := present01(bidder_id)]
-    
-    dt[, ind_tr_award_pub :=
-         present01(as.character(tender_publications_firstdcontractawarddate))]
-    
-    dt[, ind_tr_buyer_loc :=
-         fifelse(
-           (!is.na(buyer_city)     & buyer_city     != "") |
-             (!is.na(buyer_postcode) & buyer_postcode != "") |
-             (!is.na(buyer_nuts)     & buyer_nuts     != ""),
-           1L, 0L
-         )]
-    
-    dt[, ind_tr_supplier_loc :=
-         fifelse(is.na(bidder_nuts), 0L,
-                 as.integer(bidder_nuts != ""))]
-    
+  }
+
+  if ("tender_publications_firstdcontractawarddate" %in% names(dt)) {
+    dt[, ind_tr_award_pub := present01(tender_publications_firstdcontractawarddate)]
+  }
+
+  # Buyer location: 1 if at least one of (buyer_nuts, buyer_city, buyer_postcode) is present
+  buyer_loc_cols <- intersect(c("buyer_nuts", "buyer_city", "buyer_postcode"), names(dt))
+  if (length(buyer_loc_cols) > 0) {
+    dt[, ind_tr_buyer_loc := as.integer(
+      Reduce(`|`, lapply(.SD, function(col) present01(col) == 1L))
+    ), .SDcols = buyer_loc_cols]
+  }
+
+  if ("bidder_nuts" %in% names(dt)) {
+    dt[, ind_tr_supplier_loc := present01(bidder_nuts)]
+  }
+
+  if ("tender_addressofimplementation_nuts" %in% names(dt)) {
     dt[, ind_tr_impl_loc := present01(tender_addressofimplementation_nuts)]
+  }
+
+  if ("bid_priceusd" %in% names(dt)) {
     dt[, ind_tr_contract_value := present01(bid_priceusd)]
   }
-  
-  
-  ## -------------------------
-  ## Competitive procedures only
-  ## -------------------------
-  
-  vars_competitive <- c(
-    "tender_proceduretype",
-    "tender_publications_firstcallfortenderdate",
-    "tender_biddeadline",
-    "notice_url"
+
+  # -------------------------
+  # 2) Competitive procedures only
+  # -------------------------
+  if ("tender_proceduretype" %in% names(dt)) {
+
+    # Normalize to avoid case/whitespace mismatches
+    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
+    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
+
+    if ("tender_publications_firstcallfortenderdate" %in% names(dt)) {
+      dt[competitive == TRUE,
+         ind_tr_call_pub := present01(tender_publications_firstcallfortenderdate)]
+    }
+
+    if ("tender_biddeadline" %in% names(dt)) {
+      dt[competitive == TRUE,
+         ind_tr_bid_deadline := present01(tender_biddeadline)]
+    }
+
+    if ("notice_url" %in% names(dt)) {
+      dt[competitive == TRUE,
+         ind_tr_bid_opening := present01(notice_url)]
+    }
+
+    # Clean up helper columns so they don't leak into exports
+    dt[, c("proc_clean", "competitive") := NULL]
+  }
+
+  # -------------------------
+  # 3) Product code
+  # -------------------------
+  if ("lot_productcode" %in% names(dt)) {
+    dt[, ind_tr_prod_code := as.integer({
+      pc <- trimws(as.character(lot_productcode))
+      !is.na(pc) & pc != "" & !(pc %in% c("99000000", "99100000", "99200000", "99300000"))
+    })]
+  }
+
+  # -------------------------
+  # 3b) Benford anomaly (NOT part of transparency index)
+  #   - If source column exists: mirror it (keep its NAs)
+  #   - If missing: stays NA_integer_
+  # -------------------------
+  if ("ind_corr_benfords" %in% names(dt)) {
+    dt[, ind_tr_benford := as.integer(ind_corr_benfords)]
+  }
+
+  # -------------------------
+  # 4) Transparency index (EXCLUDES Benford)
+  # -------------------------
+  TR_INDICATOR_VARS <- c(
+    "ind_tr_proc_type",
+    "ind_tr_buyer_id",
+    "ind_tr_supplier_id",
+    "ind_tr_award_pub",
+    "ind_tr_buyer_loc",
+    "ind_tr_supplier_loc",
+    "ind_tr_impl_loc",
+    "ind_tr_contract_value",
+    "ind_tr_call_pub",
+    "ind_tr_bid_deadline",
+    "ind_tr_bid_opening",
+    "ind_tr_prod_code"
   )
-  
-  if (!vars_exist(dt, vars_competitive)) {
-    
-    # No competitive transparency information available
-    dt[, c(
-      "ind_tr_call_pub",
-      "ind_tr_bid_deadline",
-      "ind_tr_bid_opening"
-    ) := 0L]
-    
-  } else {
-    
-    dt[, competitive := tender_proceduretype %in% c("OPEN", "RESTRICTED")]
-    
-    dt[, ind_tr_call_pub := 0L]
-    dt[competitive == TRUE,
-       ind_tr_call_pub :=
-         fifelse(!is.na(tender_publications_firstcallfortenderdate), 1L, 0L)
-    ]
-    
-    dt[, ind_tr_bid_deadline := 0L]
-    dt[competitive == TRUE,
-       ind_tr_bid_deadline :=
-         fifelse(!is.na(tender_biddeadline), 1L, 0L)
-    ]
-    
-    dt[, ind_tr_bid_opening := 0L]
-    dt[competitive == TRUE,
-       ind_tr_bid_opening := present01(notice_url)
-    ]
-  }
-  
-  
-  ## -------------------------
-  ## Product code
-  ## -------------------------
-  
-  if (!vars_exist(dt, "lot_productcode")) {
-    
-    dt[, ind_tr_prod_code := 0L]
-    
-  } else {
-    
-    dt[, ind_tr_prod_code :=
-         as.integer(
-           !is.na(lot_productcode) &
-             lot_productcode != "" &
-             !(lot_productcode %in% c("99000000", "99100000",
-                                      "99200000", "99300000"))
-         )]
-  }
-  return(dt)
-}
 
-  ## -------------------------
-  ## Transparency index
-  ## -------------------------
-
-TR_INDICATOR_VARS <- c(
-  "ind_tr_proc_type",
-  "ind_tr_buyer_id",
-  "ind_tr_supplier_id",
-  "ind_tr_award_pub",
-  "ind_tr_buyer_loc",
-  "ind_tr_supplier_loc",
-  "ind_tr_impl_loc",
-  "ind_tr_contract_value",
-  "ind_tr_call_pub",
-  "ind_tr_bid_deadline",
-  "ind_tr_bid_opening",
-  "ind_tr_prod_code"
-)
-
-  existing_tr_vars <- TR_INDICATOR_VARS[TR_INDICATOR_VARS %in% names(dt)]
-
-  if (length(existing_tr_vars) == 0) {
-    dt[, ind_tr_index := NA_real_]
-  } else {
-    dt[, ind_tr_index := rowMeans(.SD, na.rm = TRUE), .SDcols = existing_tr_vars]
-  }
+  dt[, ind_tr_index := rowMeans(.SD), .SDcols = TR_INDICATOR_VARS]
 
   return(dt)
 }
+
 
 # --------------------------------------------------
 # 2. Openness indicators
 # --------------------------------------------------
 
 calc_openness_indicators <- function(dt) {
-  
   setDT(dt)
-  
-  ## -------------------------
-  ## Procedure type: OPEN
-  ## -------------------------
-  
+
+  # ==================================================
+  # Openness indicators
+  #  1) ind_op_open_proc_method     (0/1) from ind_corr_nonopen_proc_method (0/50/100)
+  #  2) ind_op_nonopen_proc_method  (0/1) from ind_corr_nonopen_proc_method (0/50/100)
+  #  3) ind_op_subm_period          (continuous days) mirrors submp (competitive only)
+  #  4) ind_op_short_subm_period    (0/1) derived from ind_corr_subm_period (0/50/100, competitive only)
+  # ==================================================
+
+  # -------------------------
+  # 0) Initialize outputs
+  # -------------------------
+  dt[, `:=`(
+    ind_op_open_proc_method    = NA_integer_,
+    ind_op_nonopen_proc_method = NA_integer_,
+    ind_op_subm_period         = NA_integer_,  # continuous days (submp)
+    ind_op_short_subm_period   = NA_integer_   # 0/1 from ind_corr_subm_period
+  )]
+
+  # -------------------------
+  # 1) Procedure method risk score (0/50/100) -> binary open/non-open
+  # Applies to ALL procedures
+  # Source: ind_corr_nonopen_proc_method
+  # Meaning:
+  #   100 = OPEN (not red flag)
+  #    50 = LIMITED (mild red flag)
+  #     0 = NON-OPEN (red flag)
+  # -------------------------
+  if ("ind_corr_nonopen_proc_method" %in% names(dt)) {
+
+    dt[, ind_op_open_proc_method := fifelse(
+      is.na(ind_corr_nonopen_proc_method),
+      NA_integer_,
+      as.integer(as.integer(ind_corr_nonopen_proc_method) == 100L)
+    )]
+
+    dt[, ind_op_nonopen_proc_method := fifelse(
+      is.na(ind_corr_nonopen_proc_method),
+      NA_integer_,
+      as.integer(as.integer(ind_corr_nonopen_proc_method) %in% c(50L, 0L))
+    )]
+  }
+
+  # -------------------------
+  # 2) Competitive mask (used ONLY for period indicators)
+  # Competitive = OPEN or RESTRICTED procedure type
+  # -------------------------
+  competitive <- rep(NA, nrow(dt))
   if ("tender_proceduretype" %in% names(dt)) {
-    
-    dt[, ind_op_open_proc :=
-         fifelse(
-           is.na(tender_proceduretype),
-           NA_integer_,
-           as.integer(tender_proceduretype == "OPEN")
-         )
-    ]
-    
-    dt[, competitive :=
-         tender_proceduretype %in% c("OPEN", "RESTRICTED")
-    ]
-    
-  } else {
-    
-    dt[, ind_op_open_proc := NA_integer_]
-    dt[, competitive := FALSE]
-    
+    proc_clean <- toupper(trimws(as.character(dt[["tender_proceduretype"]])))
+    competitive <- !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
   }
-  
-  ## -------------------------
-  ## Procedure type: NON-OPEN
-  ## (everything except OPEN, NA stays NA)
-  ## -------------------------
-  
-  if ("tender_proceduretype" %in% names(dt)) {
-    
-    dt[, ind_op_nonopen_proc :=
-         fifelse(
-           is.na(tender_proceduretype),
-           NA_integer_,
-           as.integer(tender_proceduretype != "OPEN")
-         )
-    ]
-    
-  } else {
-    
-    dt[, ind_op_nonopen_proc := NA_integer_]
-    
-  }
-  
-  ## -------------------------
-  ## Advertisement period
-  ## (alias of submission period, if available)
-  ## -------------------------
-  
+
+  # -------------------------
+  # 3) Submission period (continuous days) mirrors submp, competitive only
+  # -------------------------
   if ("submp" %in% names(dt)) {
-    dt[, ind_op_adv_period := as.integer(submp)]
-  } else {
-    dt[, ind_op_adv_period := NA_integer_]
+    dt[competitive == TRUE, ind_op_subm_period := as.integer(submp)]
   }
-  
-  ## -------------------------
-  ## Short advertisement flag
-  ## (submission period < 15 days)
-  ## -------------------------
-  
-  if ("submp" %in% names(dt)) {
-    
-    dt[, ind_op_short_adv_flag :=
-         fifelse(
-           is.na(submp),
-           NA_integer_,
-           as.integer(submp < 15)
-         )
-    ]
-    
-  } else {
-    
-    dt[, ind_op_short_adv_flag := NA_integer_]
-    
+
+  # -------------------------
+  # 4) Short submission period flag (0/1) from ind_corr_subm_period (0/50/100), competitive only
+  #   100 -> 0 (not a red flag)
+  #   50 or 0 -> 1 (short / red flag of any level)
+  # -------------------------
+  if ("ind_corr_subm_period" %in% names(dt)) {
+    dt[competitive == TRUE, ind_op_short_subm_period := fifelse(
+      is.na(ind_corr_subm_period),
+      NA_integer_,
+      as.integer(as.integer(ind_corr_subm_period) %in% c(50L, 0L))
+    )]
   }
-  
+
   return(dt)
 }
-
 
 # --------------------------------------------------
 # 3. Administrative efficiency indicators
 # --------------------------------------------------
 
-  ## -------------------------
-  ## Decision period
-  ## -------------------------
+  calc_admin_efficiency_indicators <- function(dt) {
+  setDT(dt)
 
-  if ("decp" %in% names(dt)) {
-    dt[, ind_adm_dec_period := as.integer(decp)]
-  } else {
-    dt[, ind_adm_dec_period := NA_integer_]
+  # -------------------------
+  # 0) Initialize outputs
+  # -------------------------
+  dt[, `:=`(
+    ind_adm_dec_period     = NA_integer_,  # continuous days (decp)
+    ind_adm_long_dec_flag  = NA_integer_   # 0/1 derived from ind_corr_dec_period (0/50/100)
+  )]
+
+  # -------------------------
+  # 1) Competitive mask (ONLY compute these indicators for competitive)
+  # Competitive = OPEN or RESTRICTED procedure type
+  # -------------------------
+  competitive <- rep(NA, nrow(dt))
+  if ("tender_proceduretype" %in% names(dt)) {
+    proc_clean <- toupper(trimws(as.character(dt[["tender_proceduretype"]])))
+    competitive <- !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
   }
 
+  # -------------------------
+  # 2) Decision period (continuous) mirrors decp, competitive only
+  # -------------------------
+  if ("decp" %in% names(dt)) {
+    dt[competitive == TRUE, ind_adm_dec_period := as.integer(decp)]
+  }
 
-  ## -------------------------
-  ## Long decision period flag
-  ## -------------------------
+  # -------------------------
+  # 3) Long decision period flag (binary) from ind_corr_dec_period (0/50/100), competitive only
+  #   100 -> 0 (not a red flag)
+  #   50 or 0 -> 1 (long decision period red flag of any level)
+  # -------------------------
+  if ("ind_corr_dec_period" %in% names(dt)) {
+    dt[competitive == TRUE, ind_adm_long_dec_flag := fifelse(
+      is.na(ind_corr_dec_period),
+      NA_integer_,
+      as.integer(as.integer(ind_corr_dec_period) %in% c(50L, 0L))
+    )]
+  }
 
-if ("ind_corr_dec_period" %in% names(dt)) {
-
-  dt[, ind_adm_long_dec_flag :=
-       fifelse(
-         is.na(ind_corr_dec_period),
-         NA_integer_,
-         as.integer(ind_corr_dec_period > LONG_DEC_THRESHOLD)
-       )
-  ]
-
-} else {
-
-  dt[, ind_adm_long_dec_flag := NA_integer_]
-
+  return(dt)
 }
-
 
 # --------------------------------------------------
 # 4. Competition indicators
 # --------------------------------------------------
 
-## -------------------------
-## Average number of bids (alias of bids count)
-## -------------------------
+calc_competition_indicators <- function(dt) {
+  setDT(dt)
 
-if ("ind_comp_bids_count" %in% names(dt)) {
-  dt[, ind_comp_avg_bids := fifelse(
-    is.na(ind_comp_bids_count),
-    NA_real_,
-    as.numeric(ind_comp_bids_count)
+  # -------------------------
+  # 0) Initialize outputs
+  # -------------------------
+  dt[, `:=`(
+    ind_comp_avg_bids            = NA_real_,
+    ind_comp_single_bid          = NA_integer_,
+    ind_comp_foreign_supplier    = NA_integer_,
+    ind_comp_bidder_non_l        = NA_integer_,  # from ind_comp_bidder_non_local (0/100)
+    ind_comp_tax_haven_suppliers = NA_integer_
   )]
-} else {
-  dt[, ind_comp_avg_bids := NA_real_]
+
+  # -------------------------
+  # Eligibility mask for avg bids + single bidding:
+  #   - Only OPEN procedure tenders
+  #   - Only where bid count reliably recorded: ind_tr_bids_nr_missing == 0
+  # -------------------------
+  eligible_open_reliable <- rep(FALSE, nrow(dt))
+  if ("tender_proceduretype" %in% names(dt) && "ind_tr_bids_nr_missing" %in% names(dt)) {
+    proc_clean <- toupper(trimws(as.character(dt[["tender_proceduretype"]])))
+    open_only <- !is.na(proc_clean) & proc_clean == "OPEN"
+    reliable <- !is.na(dt[["ind_tr_bids_nr_missing"]]) & dt[["ind_tr_bids_nr_missing"]] == 0L
+    eligible_open_reliable <- open_only & reliable
+  }
+
+  # -------------------------
+  # 1) Average number of bids (mirror bids count), eligible rows only
+  # -------------------------
+  if ("ind_comp_bids_count" %in% names(dt)) {
+    dt[eligible_open_reliable == TRUE, ind_comp_avg_bids := fifelse(
+      is.na(ind_comp_bids_count),
+      NA_real_,
+      as.numeric(ind_comp_bids_count)
+    )]
+  }
+
+  # -------------------------
+  # 2) Single bidding (invert corrected single-bid indicator), eligible rows only
+  # Rule:
+  #   ind_corr_singleb == 0 -> 1
+  #   ind_corr_singleb == 1 -> 0
+  #   else -> NA
+  # -------------------------
+  if ("ind_corr_singleb" %in% names(dt)) {
+    dt[eligible_open_reliable == TRUE, ind_comp_single_bid := fifelse(
+      is.na(ind_corr_singleb),
+      NA_integer_,
+      fifelse(ind_corr_singleb %in% c(0L, 1L),
+              as.integer(1L - as.integer(ind_corr_singleb)),
+              NA_integer_)
+    )]
+  }
+
+  # -------------------------
+  # 3) Foreign supplier (1 = bidder_country != tender_country)
+  # -------------------------
+  if (all(c("bidder_country", "tender_country") %in% names(dt))) {
+    dt[, bidder_country_clean := toupper(trimws(as.character(bidder_country)))]
+    dt[, tender_country_clean := toupper(trimws(as.character(tender_country)))]
+
+    dt[, ind_comp_foreign_supplier := fifelse(
+      bidder_country_clean == "" | tender_country_clean == "",
+      NA_integer_,
+      fifelse(
+        is.na(bidder_country_clean) | is.na(tender_country_clean),
+        NA_integer_,
+        as.integer(bidder_country_clean != tender_country_clean)
+      )
+    )]
+
+    dt[, c("bidder_country_clean", "tender_country_clean") := NULL]
+  }
+
+  # -------------------------
+  # 4) Non-local supplier (from 0/100 coding)
+  # Source: ind_comp_bidder_non_local
+  # 100 -> 1, 0 -> 0, NA -> NA, else NA
+  # -------------------------
+  if ("ind_comp_bidder_non_local" %in% names(dt)) {
+    dt[, ind_comp_bidder_non_l := fifelse(
+      is.na(ind_comp_bidder_non_local),
+      NA_integer_,
+      fifelse(ind_comp_bidder_non_local == 100L, 1L,
+              fifelse(ind_comp_bidder_non_local == 0L, 0L, NA_integer_))
+    )]
+  }
+
+  # -------------------------
+  # 5) Tax haven supplier flag
+  # Base: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
+  # -------------------------
+  if ("ind_corr_taxhaven" %in% names(dt)) {
+    dt[, ind_comp_tax_haven_suppliers := fifelse(
+      is.na(ind_corr_taxhaven),
+      NA_integer_,
+      fifelse(ind_corr_taxhaven == 0L, 1L,
+              fifelse(ind_corr_taxhaven == 100L, 0L, NA_integer_))
+    )]
+  }
+
+  return(dt)
 }
-
-## -------------------------
-## Single bidding (alias of corrected single-bid indicator)
-## -------------------------
-
-if ("ind_corr_singleb" %in% names(dt)) {
-  dt[, ind_comp_single_bid := fifelse(
-    is.na(ind_corr_singleb),
-    NA_integer_,
-    as.integer(ind_corr_singleb)
-  )]
-} else {
-  dt[, ind_comp_single_bid := NA_integer_]
-}
-
-
-
-## -------------------------
-## Foreign supplier (1 = bidder_country != buyer_country)
-## -------------------------
-
-if (all(c("bidder_country", "buyer_country") %in% names(dt))) {
-
-  # normalize (trim + uppercase) to avoid false mismatches
-  dt[, buyer_country_clean  := toupper(trimws(as.character(buyer_country)))]
-  dt[, bidder_country_clean := toupper(trimws(as.character(bidder_country)))]
-
-  dt[, ind_comp_foreign_supplier :=
-       fifelse(
-         buyer_country_clean == "" | bidder_country_clean == "",
-         NA_integer_,
-         fifelse(
-           is.na(buyer_country_clean) | is.na(bidder_country_clean),
-           NA_integer_,
-           as.integer(bidder_country_clean != buyer_country_clean)
-         )
-       )
-  ]
-
-## -------------------------
-## Non-local suppliers
-## ind_comp_bidder_non_local
-## -------------------------
-
-
-## -------------------------
-## Tax haven supplier flag (1 = supplier in tax haven)
-## Base: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
-## -------------------------
-
-if ("ind_corr_taxhaven" %in% names(dt)) {
-
-  dt[, ind_comp_tax_haven_suppliers :=
-       fifelse(
-         is.na(ind_corr_taxhaven),
-         NA_integer_,
-         fifelse(ind_corr_taxhaven == 0L,   1L,   # tax haven
-                 fifelse(ind_corr_taxhaven == 100L, 0L, NA_integer_))  # not tax haven
-       )
-  ]
-
-} else {
-
-  dt[, ind_comp_tax_haven_suppliers := NA_integer_]
-
-}
-
 
 # --------------------------------------------------
 # 5. Economic performance & value for money
 # --------------------------------------------------
 
-Sector composition?
+#Sector composition: not as separate indicator
 
 
 
@@ -424,6 +433,7 @@ Sector composition?
 # COUNTRY LEVEL CALCULATIONS
 # --------------------------------------------------
 
+# Transparency index inputs (do NOT include benford here, since it's not part of index)
 TR_INDICATOR_VARS <- c(
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
@@ -439,46 +449,60 @@ TR_INDICATOR_VARS <- c(
   "ind_tr_prod_code"
 )
 
-IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index")
+# All transparency outputs you want tabulated
+# (benford is not in index, but you still might want it in tables/exports)
+IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index", "ind_tr_benford")
 
+# Openness (FINAL names)
 IND_OP_VARS <- c(
-  "ind_op_open_proc",
-  "ind_op_nonopen_proc",
-  "ind_op_adv_period",
-  "ind_op_short_adv_flag"
+  "ind_op_open_proc_method",
+  "ind_op_nonopen_proc_method",
+  "ind_op_subm_period",
+  "ind_op_short_subm_period"
 )
 
+# Admin efficiency (FINAL names)
 IND_ADM_VARS <- c(
   "ind_adm_dec_period",
   "ind_adm_long_dec_flag"
 )
 
+# Competition (include the new non-local recode)
 IND_COMP_VARS <- c(
   "ind_comp_avg_bids",
   "ind_comp_single_bid",
   "ind_comp_foreign_supplier",
+  "ind_comp_bidder_non_l",
   "ind_comp_tax_haven_suppliers"
 )
 
 
 run_country <- function(cc, data_dir) {
-  
+
   dt <- country_data(country_code = cc, data_dir = data_dir)
   setDT(dt)
-  
-  dt <- calc_openness_indicators(dt)
+
+  # Compute indicator groups
   dt <- calc_transparency_indicators(dt)
-  
+  dt <- calc_openness_indicators(dt)
+  dt <- calc_admin_efficiency_indicators(dt)
+  dt <- calc_competition_indicators(dt)
+
+  # Helper: only tabulate vars that exist (prevents errors if a function changes later)
+  tabulate_vars <- function(vars, dt) {
+    vars_ok <- intersect(vars, names(dt))
+    setNames(
+      lapply(vars_ok, function(v) table(dt[[v]], useNA = "ifany")),
+      vars_ok
+    )
+  }
+
   list(
     data = dt,
-    tables_tr = setNames(
-      lapply(IND_TR_VARS, function(v) table(dt[[v]], useNA = "ifany")),
-      IND_TR_VARS
-    ),
-    tables_op = setNames(
-      lapply(IND_OP_VARS, function(v) table(dt[[v]], useNA = "ifany")),
-      IND_OP_VARS
-    )
+    tables_tr   = tabulate_vars(IND_TR_VARS, dt),
+    tables_op   = tabulate_vars(IND_OP_VARS, dt),
+    tables_adm  = tabulate_vars(IND_ADM_VARS, dt),
+    tables_comp = tabulate_vars(IND_COMP_VARS, dt)
   )
 }
 
@@ -490,280 +514,370 @@ run_country <- function(cc, data_dir) {
 # Armenia
 am <- run_country("AM", data_dir)
 dt_am <- am$data
-tables_tr_am <- am$tables_tr
-tables_op_am <- am$tables_op
+tables_tr_am   <- am$tables_tr
+tables_op_am   <- am$tables_op
+tables_adm_am  <- am$tables_adm
+tables_comp_am <- am$tables_comp
 
 # Austria
 at <- run_country("AT", data_dir)
 dt_at <- at$data
-tables_tr_at <- at$tables_tr
-tables_op_at <- at$tables_op
+tables_tr_at   <- at$tables_tr
+tables_op_at   <- at$tables_op
+tables_adm_at  <- at$tables_adm
+tables_comp_at <- at$tables_comp
 
 # Belgium
 be <- run_country("BE", data_dir)
 dt_be <- be$data
-tables_tr_be <- be$tables_tr
-tables_op_be <- be$tables_op
+tables_tr_be   <- be$tables_tr
+tables_op_be   <- be$tables_op
+tables_adm_be  <- be$tables_adm
+tables_comp_be <- be$tables_comp
 
 # Bulgaria
 bg <- run_country("BG", data_dir)
 dt_bg <- bg$data
-tables_tr_bg <- bg$tables_tr
-tables_op_bg <- bg$tables_op
+tables_tr_bg   <- bg$tables_tr
+tables_op_bg   <- bg$tables_op
+tables_adm_bg  <- bg$tables_adm
+tables_comp_bg <- bg$tables_comp
 
 # Switzerland
 ch <- run_country("CH", data_dir)
 dt_ch <- ch$data
-tables_tr_ch <- ch$tables_tr
-tables_op_ch <- ch$tables_op
+tables_tr_ch   <- ch$tables_tr
+tables_op_ch   <- ch$tables_op
+tables_adm_ch  <- ch$tables_adm
+tables_comp_ch <- ch$tables_comp
 
 # Chile
 cl <- run_country("CL", data_dir)
 dt_cl <- cl$data
-tables_tr_cl <- cl$tables_tr
-tables_op_cl <- cl$tables_op
+tables_tr_cl   <- cl$tables_tr
+tables_op_cl   <- cl$tables_op
+tables_adm_cl  <- cl$tables_adm
+tables_comp_cl <- cl$tables_comp
 
 # Colombia
 co <- run_country("CO", data_dir)
 dt_co <- co$data
-tables_tr_co <- co$tables_tr
-tables_op_co <- co$tables_op
+tables_tr_co   <- co$tables_tr
+tables_op_co   <- co$tables_op
+tables_adm_co  <- co$tables_adm
+tables_comp_co <- co$tables_comp
 
 # Cyprus
 cy <- run_country("CY", data_dir)
 dt_cy <- cy$data
-tables_tr_cy <- cy$tables_tr
-tables_op_cy <- cy$tables_op
+tables_tr_cy   <- cy$tables_tr
+tables_op_cy   <- cy$tables_op
+tables_adm_cy  <- cy$tables_adm
+tables_comp_cy <- cy$tables_comp
 
 # Czech Republic
 cz <- run_country("CZ", data_dir)
 dt_cz <- cz$data
-tables_tr_cz <- cz$tables_tr
-tables_op_cz <- cz$tables_op
+tables_tr_cz   <- cz$tables_tr
+tables_op_cz   <- cz$tables_op
+tables_adm_cz  <- cz$tables_adm
+tables_comp_cz <- cz$tables_comp
 
 # Germany
 de <- run_country("DE", data_dir)
 dt_de <- de$data
-tables_tr_de <- de$tables_tr
-tables_op_de <- de$tables_op
+tables_tr_de   <- de$tables_tr
+tables_op_de   <- de$tables_op
+tables_adm_de  <- de$tables_adm
+tables_comp_de <- de$tables_comp
 
 # Denmark
 dk <- run_country("DK", data_dir)
 dt_dk <- dk$data
-tables_tr_dk <- dk$tables_tr
-tables_op_dk <- dk$tables_op
+tables_tr_dk   <- dk$tables_tr
+tables_op_dk   <- dk$tables_op
+tables_adm_dk  <- dk$tables_adm
+tables_comp_dk <- dk$tables_comp
 
 # Estonia
 ee <- run_country("EE", data_dir)
 dt_ee <- ee$data
-tables_tr_ee <- ee$tables_tr
-tables_op_ee <- ee$tables_op
+tables_tr_ee   <- ee$tables_tr
+tables_op_ee   <- ee$tables_op
+tables_adm_ee  <- ee$tables_adm
+tables_comp_ee <- ee$tables_comp
 
 # Spain
 es <- run_country("ES", data_dir)
 dt_es <- es$data
-tables_tr_es <- es$tables_tr
-tables_op_es <- es$tables_op
+tables_tr_es   <- es$tables_tr
+tables_op_es   <- es$tables_op
+tables_adm_es  <- es$tables_adm
+tables_comp_es <- es$tables_comp
 
 # Finland
 fi <- run_country("FI", data_dir)
 dt_fi <- fi$data
-tables_tr_fi <- fi$tables_tr
-tables_op_fi <- fi$tables_op
+tables_tr_fi   <- fi$tables_tr
+tables_op_fi   <- fi$tables_op
+tables_adm_fi  <- fi$tables_adm
+tables_comp_fi <- fi$tables_comp
 
 # France
 fr <- run_country("FR", data_dir)
 dt_fr <- fr$data
-tables_tr_fr <- fr$tables_tr
-tables_op_fr <- fr$tables_op
+tables_tr_fr   <- fr$tables_tr
+tables_op_fr   <- fr$tables_op
+tables_adm_fr  <- fr$tables_adm
+tables_comp_fr <- fr$tables_comp
 
 # Georgia
 ge <- run_country("GE", data_dir)
 dt_ge <- ge$data
-tables_tr_ge <- ge$tables_tr
-tables_op_ge <- ge$tables_op
+tables_tr_ge   <- ge$tables_tr
+tables_op_ge   <- ge$tables_op
+tables_adm_ge  <- ge$tables_adm
+tables_comp_ge <- ge$tables_comp
 
 # Greece
 gr <- run_country("GR", data_dir)
 dt_gr <- gr$data
-tables_tr_gr <- gr$tables_tr
-tables_op_gr <- gr$tables_op
+tables_tr_gr   <- gr$tables_tr
+tables_op_gr   <- gr$tables_op
+tables_adm_gr  <- gr$tables_adm
+tables_comp_gr <- gr$tables_comp
 
 # Croatia
 hr <- run_country("HR", data_dir)
 dt_hr <- hr$data
-tables_tr_hr <- hr$tables_tr
-tables_op_hr <- hr$tables_op
+tables_tr_hr   <- hr$tables_tr
+tables_op_hr   <- hr$tables_op
+tables_adm_hr  <- hr$tables_adm
+tables_comp_hr <- hr$tables_comp
 
 # Hungary
 hu <- run_country("HU", data_dir)
 dt_hu <- hu$data
-tables_tr_hu <- hu$tables_tr
-tables_op_hu <- hu$tables_op
+tables_tr_hu   <- hu$tables_tr
+tables_op_hu   <- hu$tables_op
+tables_adm_hu  <- hu$tables_adm
+tables_comp_hu <- hu$tables_comp
 
 # Indonesia
 id <- run_country("ID", data_dir)
 dt_id <- id$data
-tables_tr_id <- id$tables_tr
-tables_op_id <- id$tables_op
+tables_tr_id   <- id$tables_tr
+tables_op_id   <- id$tables_op
+tables_adm_id  <- id$tables_adm
+tables_comp_id <- id$tables_comp
 
 # Ireland
 ie <- run_country("IE", data_dir)
 dt_ie <- ie$data
-tables_tr_ie <- ie$tables_tr
-tables_op_ie <- ie$tables_op
+tables_tr_ie   <- ie$tables_tr
+tables_op_ie   <- ie$tables_op
+tables_adm_ie  <- ie$tables_adm
+tables_comp_ie <- ie$tables_comp
 
 # India
 in_ <- run_country("IN", data_dir)
 dt_in <- in_$data
-tables_tr_in <- in_$tables_tr
-tables_op_in <- in_$tables_op
+tables_tr_in   <- in_$tables_tr
+tables_op_in   <- in_$tables_op
+tables_adm_in  <- in_$tables_adm
+tables_comp_in <- in_$tables_comp
 
 # Iceland
 is_ <- run_country("IS", data_dir)
 dt_is <- is_$data
-tables_tr_is <- is_$tables_tr
-tables_op_is <- is_$tables_op
+tables_tr_is   <- is_$tables_tr
+tables_op_is   <- is_$tables_op
+tables_adm_is  <- is_$tables_adm
+tables_comp_is <- is_$tables_comp
 
 # Italy
 it <- run_country("IT", data_dir)
 dt_it <- it$data
-tables_tr_it <- it$tables_tr
-tables_op_it <- it$tables_op
+tables_tr_it   <- it$tables_tr
+tables_op_it   <- it$tables_op
+tables_adm_it  <- it$tables_adm
+tables_comp_it <- it$tables_comp
 
 # Jamaica
 jm <- run_country("JM", data_dir)
 dt_jm <- jm$data
-tables_tr_jm <- jm$tables_tr
-tables_op_jm <- jm$tables_op
+tables_tr_jm   <- jm$tables_tr
+tables_op_jm   <- jm$tables_op
+tables_adm_jm  <- jm$tables_adm
+tables_comp_jm <- jm$tables_comp
 
 # Kenya
 ke <- run_country("KE", data_dir)
 dt_ke <- ke$data
-tables_tr_ke <- ke$tables_tr
-tables_op_ke <- ke$tables_op
+tables_tr_ke   <- ke$tables_tr
+tables_op_ke   <- ke$tables_op
+tables_adm_ke  <- ke$tables_adm
+tables_comp_ke <- ke$tables_comp
 
 # Lithuania
 lt <- run_country("LT", data_dir)
 dt_lt <- lt$data
-tables_tr_lt <- lt$tables_tr
-tables_op_lt <- lt$tables_op
+tables_tr_lt   <- lt$tables_tr
+tables_op_lt   <- lt$tables_op
+tables_adm_lt  <- lt$tables_adm
+tables_comp_lt <- lt$tables_comp
 
 # Luxembourg
 lu <- run_country("LU", data_dir)
 dt_lu <- lu$data
-tables_tr_lu <- lu$tables_tr
-tables_op_lu <- lu$tables_op
+tables_tr_lu   <- lu$tables_tr
+tables_op_lu   <- lu$tables_op
+tables_adm_lu  <- lu$tables_adm
+tables_comp_lu <- lu$tables_comp
 
 # Latvia
 lv <- run_country("LV", data_dir)
 dt_lv <- lv$data
-tables_tr_lv <- lv$tables_tr
-tables_op_lv <- lv$tables_op
+tables_tr_lv   <- lv$tables_tr
+tables_op_lv   <- lv$tables_op
+tables_adm_lv  <- lv$tables_adm
+tables_comp_lv <- lv$tables_comp
 
 # Moldova
 md <- run_country("MD", data_dir)
 dt_md <- md$data
-tables_tr_md <- md$tables_tr
-tables_op_md <- md$tables_op
+tables_tr_md   <- md$tables_tr
+tables_op_md   <- md$tables_op
+tables_adm_md  <- md$tables_adm
+tables_comp_md <- md$tables_comp
 
 # North Macedonia
 mk <- run_country("MK", data_dir)
 dt_mk <- mk$data
-tables_tr_mk <- mk$tables_tr
-tables_op_mk <- mk$tables_op
+tables_tr_mk   <- mk$tables_tr
+tables_op_mk   <- mk$tables_op
+tables_adm_mk  <- mk$tables_adm
+tables_comp_mk <- mk$tables_comp
 
 # Malta
 mt <- run_country("MT", data_dir)
 dt_mt <- mt$data
-tables_tr_mt <- mt$tables_tr
-tables_op_mt <- mt$tables_op
+tables_tr_mt   <- mt$tables_tr
+tables_op_mt   <- mt$tables_op
+tables_adm_mt  <- mt$tables_adm
+tables_comp_mt <- mt$tables_comp
 
 # Mexico
 mx <- run_country("MX", data_dir)
 dt_mx <- mx$data
-tables_tr_mx <- mx$tables_tr
-tables_op_mx <- mx$tables_op
+tables_tr_mx   <- mx$tables_tr
+tables_op_mx   <- mx$tables_op
+tables_adm_mx  <- mx$tables_adm
+tables_comp_mx <- mx$tables_comp
 
 # Netherlands
 nl <- run_country("NL", data_dir)
 dt_nl <- nl$data
-tables_tr_nl <- nl$tables_tr
-tables_op_nl <- nl$tables_op
+tables_tr_nl   <- nl$tables_tr
+tables_op_nl   <- nl$tables_op
+tables_adm_nl  <- nl$tables_adm
+tables_comp_nl <- nl$tables_comp
 
 # Norway
 no <- run_country("NO", data_dir)
 dt_no <- no$data
-tables_tr_no <- no$tables_tr
-tables_op_no <- no$tables_op
+tables_tr_no   <- no$tables_tr
+tables_op_no   <- no$tables_op
+tables_adm_no  <- no$tables_adm
+tables_comp_no <- no$tables_comp
 
 # Poland
 pl <- run_country("PL", data_dir)
 dt_pl <- pl$data
-tables_tr_pl <- pl$tables_tr
-tables_op_pl <- pl$tables_op
+tables_tr_pl   <- pl$tables_tr
+tables_op_pl   <- pl$tables_op
+tables_adm_pl  <- pl$tables_adm
+tables_comp_pl <- pl$tables_comp
 
 # Portugal
 pt <- run_country("PT", data_dir)
 dt_pt <- pt$data
-tables_tr_pt <- pt$tables_tr
-tables_op_pt <- pt$tables_op
+tables_tr_pt   <- pt$tables_tr
+tables_op_pt   <- pt$tables_op
+tables_adm_pt  <- pt$tables_adm
+tables_comp_pt <- pt$tables_comp
 
 # Paraguay
 py <- run_country("PY", data_dir)
 dt_py <- py$data
-tables_tr_py <- py$tables_tr
-tables_op_py <- py$tables_op
+tables_tr_py   <- py$tables_tr
+tables_op_py   <- py$tables_op
+tables_adm_py  <- py$tables_adm
+tables_comp_py <- py$tables_comp
 
 # Romania
 ro <- run_country("RO", data_dir)
 dt_ro <- ro$data
-tables_tr_ro <- ro$tables_tr
-tables_op_ro <- ro$tables_op
+tables_tr_ro   <- ro$tables_tr
+tables_op_ro   <- ro$tables_op
+tables_adm_ro  <- ro$tables_adm
+tables_comp_ro <- ro$tables_comp
 
 # Sweden
 se <- run_country("SE", data_dir)
 dt_se <- se$data
-tables_tr_se <- se$tables_tr
-tables_op_se <- se$tables_op
+tables_tr_se   <- se$tables_tr
+tables_op_se   <- se$tables_op
+tables_adm_se  <- se$tables_adm
+tables_comp_se <- se$tables_comp
 
 # Slovenia
 si <- run_country("SI", data_dir)
 dt_si <- si$data
-tables_tr_si <- si$tables_tr
-tables_op_si <- si$tables_op
+tables_tr_si   <- si$tables_tr
+tables_op_si   <- si$tables_op
+tables_adm_si  <- si$tables_adm
+tables_comp_si <- si$tables_comp
 
 # Slovakia
 sk <- run_country("SK", data_dir)
 dt_sk <- sk$data
-tables_tr_sk <- sk$tables_tr
-tables_op_sk <- sk$tables_op
+tables_tr_sk   <- sk$tables_tr
+tables_op_sk   <- sk$tables_op
+tables_adm_sk  <- sk$tables_adm
+tables_comp_sk <- sk$tables_comp
 
 # Uganda
 ug <- run_country("UG", data_dir)
 dt_ug <- ug$data
-tables_tr_ug <- ug$tables_tr
-tables_op_ug <- ug$tables_op
+tables_tr_ug   <- ug$tables_tr
+tables_op_ug   <- ug$tables_op
+tables_adm_ug  <- ug$tables_adm
+tables_comp_ug <- ug$tables_comp
 
 # United Kingdom
 uk <- run_country("UK", data_dir)
 dt_uk <- uk$data
-tables_tr_uk <- uk$tables_tr
-tables_op_uk <- uk$tables_op
+tables_tr_uk   <- uk$tables_tr
+tables_op_uk   <- uk$tables_op
+tables_adm_uk  <- uk$tables_adm
+tables_comp_uk <- uk$tables_comp
 
 # United States
 us <- run_country("US", data_dir)
 dt_us <- us$data
-tables_tr_us <- us$tables_tr
-tables_op_us <- us$tables_op
+tables_tr_us   <- us$tables_tr
+tables_op_us   <- us$tables_op
+tables_adm_us  <- us$tables_adm
+tables_comp_us <- us$tables_comp
 
 # Uruguay
 uy <- run_country("UY", data_dir)
 dt_uy <- uy$data
-tables_tr_uy <- uy$tables_tr
-tables_op_uy <- uy$tables_op
-
-
+tables_tr_uy   <- uy$tables_tr
+tables_op_uy   <- uy$tables_op
+tables_adm_uy  <- uy$tables_adm
+tables_comp_uy <- uy$tables_comp
 
 # --------------------------------------------------
 # Export
