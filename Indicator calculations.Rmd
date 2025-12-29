@@ -35,17 +35,17 @@ country_data <- function(country_code, data_dir) {
 # - Most indicators apply to all awarded contracts.
 # - Selected indicators are restricted to competitive procedures
 # In all indicators: 1 = value is present in the dataset
+# Benford: binary red-flag for aggregation (NOT part of transparency index)
+#   ind_tr_benford: 1 = red flag (likely manipulated), 0 = not red flag, NA = unknown
 
+library(data.table)
 
 vars_exist <- function(dt, vars) {
   all(vars %in% names(dt))
 }
 
 present01 <- function(x) {
-  as.integer(
-    !is.na(x) &
-      trimws(as.character(x)) != ""
-  )
+  as.integer(!is.na(x) & trimws(as.character(x)) != "")
 }
 
 calc_transparency_indicators <- function(dt) {
@@ -53,8 +53,8 @@ calc_transparency_indicators <- function(dt) {
 
   # -------------------------
   # 0) Initialize indicators
-  #   - Most transparency indicators: missing input column => indicator stays 0
-  #   - Benford: missing input column => NA (special case, NOT part of index)
+  #   - Missing input column => indicator stays 0
+  #   - Benford: NA if source missing
   # -------------------------
   dt[, `:=`(
     ind_tr_proc_type       = 0L,
@@ -69,7 +69,7 @@ calc_transparency_indicators <- function(dt) {
     ind_tr_bid_deadline    = 0L,
     ind_tr_bid_opening     = 0L,
     ind_tr_prod_code       = 0L,
-    ind_tr_benford         = NA_integer_   # mirrors ind_corr_benfords if present
+    ind_tr_benford         = NA_integer_
   )]
 
   # -------------------------
@@ -130,6 +130,7 @@ calc_transparency_indicators <- function(dt) {
          ind_tr_bid_deadline := present01(tender_biddeadline)]
     }
 
+    # NOTE: This uses notice_url as a proxy for bid opening info.
     if ("notice_url" %in% names(dt)) {
       dt[competitive == TRUE,
          ind_tr_bid_opening := present01(notice_url)]
@@ -151,11 +152,21 @@ calc_transparency_indicators <- function(dt) {
 
   # -------------------------
   # 3b) Benford anomaly (NOT part of transparency index)
-  #   - If source column exists: mirror it (keep its NAs)
-  #   - If missing: stays NA_integer_
+  # Source: ind_corr_benfords (commonly 0/50/100)
+  # Meaning you gave:
+  #   100 = less likely manipulated (NOT a red flag)
+  #   0   = most likely manipulated (red flag)
+  # Binary flag for aggregation:
+  #   1 = red flag (likely manipulated)
+  #   0 = not red flag
   # -------------------------
   if ("ind_corr_benfords" %in% names(dt)) {
-    dt[, ind_tr_benford := as.integer(ind_corr_benfords)]
+    dt[, ind_tr_benford := fifelse(
+      is.na(ind_corr_benfords),
+      NA_integer_,
+      fifelse(as.integer(ind_corr_benfords) %in% c(0L, 50L), 1L,
+              fifelse(as.integer(ind_corr_benfords) == 100L, 0L, NA_integer_))
+    )]
   }
 
   # -------------------------
@@ -333,41 +344,49 @@ calc_competition_indicators <- function(dt) {
   # -------------------------
   # Eligibility mask for avg bids + single bidding:
   #   - Only OPEN procedure tenders
-  #   - Only where bid count reliably recorded: ind_tr_bids_nr_missing == 0
+  #   - (Removed filter: ind_tr_bids_nr_missing == 0)
   # -------------------------
-  eligible_open_reliable <- rep(FALSE, nrow(dt))
-  if ("tender_proceduretype" %in% names(dt) && "ind_tr_bids_nr_missing" %in% names(dt)) {
+  eligible_open <- rep(FALSE, nrow(dt))
+  if ("tender_proceduretype" %in% names(dt)) {
     proc_clean <- toupper(trimws(as.character(dt[["tender_proceduretype"]])))
-    open_only <- !is.na(proc_clean) & proc_clean == "OPEN"
-    reliable <- !is.na(dt[["ind_tr_bids_nr_missing"]]) & dt[["ind_tr_bids_nr_missing"]] == 0L
-    eligible_open_reliable <- open_only & reliable
+    eligible_open <- !is.na(proc_clean) & proc_clean == "OPEN"
   }
 
   # -------------------------
-  # 1) Average number of bids (mirror bids count), eligible rows only
+  # 1) Average number of bids (mirror bids count), OPEN rows only
+  # Uses ind_comp_bids_count if present, otherwise bid_number if present
   # -------------------------
-  if ("ind_comp_bids_count" %in% names(dt)) {
-    dt[eligible_open_reliable == TRUE, ind_comp_avg_bids := fifelse(
-      is.na(ind_comp_bids_count),
+  bids_col <- if ("ind_comp_bids_count" %in% names(dt)) {
+    "ind_comp_bids_count"
+  } else if ("bid_number" %in% names(dt)) {
+    "bid_number"
+  } else {
+    NA_character_
+  }
+
+  if (!is.na(bids_col)) {
+    dt[eligible_open == TRUE, ind_comp_avg_bids := fifelse(
+      is.na(get(bids_col)),
       NA_real_,
-      as.numeric(ind_comp_bids_count)
+      as.numeric(get(bids_col))
     )]
   }
 
   # -------------------------
-  # 2) Single bidding (invert corrected single-bid indicator), eligible rows only
-  # Rule:
-  #   ind_corr_singleb == 0 -> 1
-  #   ind_corr_singleb == 1 -> 0
-  #   else -> NA
+  # 2) Single bidding (binary), OPEN rows only
+  # Original ind_corr_singleb coding (your definition):
+  #   100 = more than 1 bid received
+  #     0 = 1 bid received
+  # Desired output:
+  #   1 = single bid (1 bid received)
+  #   0 = not single bid (>1 bid)
   # -------------------------
   if ("ind_corr_singleb" %in% names(dt)) {
-    dt[eligible_open_reliable == TRUE, ind_comp_single_bid := fifelse(
+    dt[eligible_open == TRUE, ind_comp_single_bid := fifelse(
       is.na(ind_corr_singleb),
       NA_integer_,
-      fifelse(ind_corr_singleb %in% c(0L, 1L),
-              as.integer(1L - as.integer(ind_corr_singleb)),
-              NA_integer_)
+      fifelse(ind_corr_singleb == 0L, 1L,
+              fifelse(ind_corr_singleb == 100L, 0L, NA_integer_))
     )]
   }
 
@@ -408,6 +427,7 @@ calc_competition_indicators <- function(dt) {
   # -------------------------
   # 5) Tax haven supplier flag
   # Base: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
+  # Output: 1 = tax haven supplier, 0 = not tax haven, NA = unknown
   # -------------------------
   if ("ind_corr_taxhaven" %in% names(dt)) {
     dt[, ind_comp_tax_haven_suppliers := fifelse(
@@ -420,6 +440,7 @@ calc_competition_indicators <- function(dt) {
 
   return(dt)
 }
+
 
 # --------------------------------------------------
 # 5. Economic performance & value for money
@@ -482,7 +503,17 @@ run_country <- function(cc, data_dir) {
   dt <- country_data(country_code = cc, data_dir = data_dir)
   setDT(dt)
 
+  # -------------------------
+  # Country-specific filters
+  # -------------------------
+  # Indonesia: keep only winning bids (awarded contracts)
+  if (cc == "ID" && "bid_iswinning" %in% names(dt)) {
+    dt <- dt[tolower(trimws(as.character(bid_iswinning))) %in% c("true", "t", "1", "yes", "y")]
+  }
+
+  # -------------------------
   # Compute indicator groups
+  # -------------------------
   dt <- calc_transparency_indicators(dt)
   dt <- calc_openness_indicators(dt)
   dt <- calc_admin_efficiency_indicators(dt)
