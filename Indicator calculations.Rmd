@@ -32,17 +32,13 @@ country_data <- function(country_code, data_dir) {
 # --------------------------------------------------
 # 1. Transparency indicators
 # --------------------------------------------------
-# - Most indicators apply to all awarded contracts.
-# - Selected indicators are restricted to competitive procedures
-# In all indicators: 1 = value is present in the dataset
-# Benford: binary red-flag for aggregation (NOT part of transparency index)
-#   ind_tr_benford: 1 = red flag (likely manipulated), 0 = not red flag, NA = unknown
-
-library(data.table)
-
-vars_exist <- function(dt, vars) {
-  all(vars %in% names(dt))
-}
+# Rules:
+# - Most indicators apply to ALL rows (all awarded contracts)
+# - Competitive-only indicators: bidder_id + bidder_loc + call_pub + bid_deadline + bid_opening
+# - Supplier_id is ALL rows (based on bidder_id)
+# - Supplier_loc is ALL rows (based on bidder_nuts)
+# - Bidder_loc is COMPETITIVE ONLY (based on bidder_city OR bidder_nuts)
+# - Transparency index includes ALL indicators except Benford
 
 present01 <- function(x) {
   as.integer(!is.na(x) & trimws(as.character(x)) != "")
@@ -53,27 +49,32 @@ calc_transparency_indicators <- function(dt) {
 
   # -------------------------
   # 0) Initialize indicators
-  #   - Missing input column => indicator stays 0
-  #   - Benford: NA if source missing
   # -------------------------
   dt[, `:=`(
     ind_tr_proc_type       = 0L,
     ind_tr_buyer_id        = 0L,
-    ind_tr_supplier_id     = 0L,
+
+    ind_tr_supplier_id     = 0L,  # ALL rows (from bidder_id)
+    ind_tr_bidder_id       = 0L,  # competitive only (from bidder_id)
+
+    ind_tr_call_pub        = 0L,  # competitive only
+    ind_tr_bid_deadline    = 0L,  # competitive only
+    ind_tr_bid_opening     = 0L,  # competitive only
+
     ind_tr_award_pub       = 0L,
-    ind_tr_buyer_loc       = 0L,
-    ind_tr_supplier_loc    = 0L,
-    ind_tr_impl_loc        = 0L,
-    ind_tr_contract_value  = 0L,
-    ind_tr_call_pub        = 0L,
-    ind_tr_bid_deadline    = 0L,
-    ind_tr_bid_opening     = 0L,
     ind_tr_prod_code       = 0L,
+
+    ind_tr_buyer_loc       = 0L,
+    ind_tr_supplier_loc    = 0L,  # ALL rows (from bidder_nuts)
+    ind_tr_impl_loc        = 0L,
+    ind_tr_bidder_loc      = 0L,  # competitive only (from bidder_city OR bidder_nuts)
+
+    ind_tr_contract_value  = 0L,
     ind_tr_benford         = NA_integer_
   )]
 
   # -------------------------
-  # 1) All awarded contracts
+  # 1) ALL rows
   # -------------------------
   if ("tender_proceduretype" %in% names(dt)) {
     dt[, ind_tr_proc_type := present01(tender_proceduretype)]
@@ -83,6 +84,7 @@ calc_transparency_indicators <- function(dt) {
     dt[, ind_tr_buyer_id := present01(buyer_id)]
   }
 
+  # Supplier ID (ALL rows): from bidder_id
   if ("bidder_id" %in% names(dt)) {
     dt[, ind_tr_supplier_id := present01(bidder_id)]
   }
@@ -91,7 +93,7 @@ calc_transparency_indicators <- function(dt) {
     dt[, ind_tr_award_pub := present01(tender_publications_firstdcontractawarddate)]
   }
 
-  # Buyer location: 1 if at least one of (buyer_nuts, buyer_city, buyer_postcode) is present
+  # Buyer location (ALL rows): any of buyer_nuts/buyer_city/buyer_postcode
   buyer_loc_cols <- intersect(c("buyer_nuts", "buyer_city", "buyer_postcode"), names(dt))
   if (length(buyer_loc_cols) > 0) {
     dt[, ind_tr_buyer_loc := as.integer(
@@ -99,6 +101,7 @@ calc_transparency_indicators <- function(dt) {
     ), .SDcols = buyer_loc_cols]
   }
 
+  # Supplier location (ALL rows): bidder_nuts
   if ("bidder_nuts" %in% names(dt)) {
     dt[, ind_tr_supplier_loc := present01(bidder_nuts)]
   }
@@ -111,38 +114,7 @@ calc_transparency_indicators <- function(dt) {
     dt[, ind_tr_contract_value := present01(bid_priceusd)]
   }
 
-  # -------------------------
-  # 2) Competitive procedures only
-  # -------------------------
-  if ("tender_proceduretype" %in% names(dt)) {
-
-    # Normalize to avoid case/whitespace mismatches
-    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
-    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
-
-    if ("tender_publications_firstcallfortenderdate" %in% names(dt)) {
-      dt[competitive == TRUE,
-         ind_tr_call_pub := present01(tender_publications_firstcallfortenderdate)]
-    }
-
-    if ("tender_biddeadline" %in% names(dt)) {
-      dt[competitive == TRUE,
-         ind_tr_bid_deadline := present01(tender_biddeadline)]
-    }
-
-    # NOTE: This uses notice_url as a proxy for bid opening info.
-    if ("notice_url" %in% names(dt)) {
-      dt[competitive == TRUE,
-         ind_tr_bid_opening := present01(notice_url)]
-    }
-
-    # Clean up helper columns so they don't leak into exports
-    dt[, c("proc_clean", "competitive") := NULL]
-  }
-
-  # -------------------------
-  # 3) Product code
-  # -------------------------
+  # Product code (ALL rows)
   if ("lot_productcode" %in% names(dt)) {
     dt[, ind_tr_prod_code := as.integer({
       pc <- trimws(as.character(lot_productcode))
@@ -151,14 +123,44 @@ calc_transparency_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 3b) Benford anomaly (NOT part of transparency index)
-  # Source: ind_corr_benfords (commonly 0/50/100)
-  # Meaning you gave:
-  #   100 = less likely manipulated (NOT a red flag)
-  #   0   = most likely manipulated (red flag)
-  # Binary flag for aggregation:
-  #   1 = red flag (likely manipulated)
-  #   0 = not red flag
+  # 2) COMPETITIVE ONLY (OPEN/RESTRICTED)
+  # -------------------------
+  if ("tender_proceduretype" %in% names(dt)) {
+
+    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
+    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
+
+    # Bidder ID (competitive only): from bidder_id
+    if ("bidder_id" %in% names(dt)) {
+      dt[competitive == TRUE, ind_tr_bidder_id := present01(bidder_id)]
+    }
+
+    # Bidder location (competitive only): any of bidder_city OR bidder_nuts
+    bidder_loc_cols <- intersect(c("bidder_city", "bidder_nuts"), names(dt))
+    if (length(bidder_loc_cols) > 0) {
+      dt[competitive == TRUE, ind_tr_bidder_loc := as.integer(
+        Reduce(`|`, lapply(.SD, function(col) present01(col) == 1L))
+      ), .SDcols = bidder_loc_cols]
+    }
+
+    if ("tender_publications_firstcallfortenderdate" %in% names(dt)) {
+      dt[competitive == TRUE, ind_tr_call_pub := present01(tender_publications_firstcallfortenderdate)]
+    }
+
+    if ("tender_biddeadline" %in% names(dt)) {
+      dt[competitive == TRUE, ind_tr_bid_deadline := present01(tender_biddeadline)]
+    }
+
+    # Proxy for bid opening info
+    if ("notice_url" %in% names(dt)) {
+      dt[competitive == TRUE, ind_tr_bid_opening := present01(notice_url)]
+    }
+
+    dt[, c("proc_clean", "competitive") := NULL]
+  }
+
+  # -------------------------
+  # 3) Benford anomaly (NOT in index)
   # -------------------------
   if ("ind_corr_benfords" %in% names(dt)) {
     dt[, ind_tr_benford := fifelse(
@@ -170,21 +172,23 @@ calc_transparency_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 4) Transparency index (EXCLUDES Benford)
+  # 4) Transparency index (INCLUDES all except Benford)
   # -------------------------
   TR_INDICATOR_VARS <- c(
     "ind_tr_proc_type",
     "ind_tr_buyer_id",
     "ind_tr_supplier_id",
-    "ind_tr_award_pub",
-    "ind_tr_buyer_loc",
-    "ind_tr_supplier_loc",
-    "ind_tr_impl_loc",
-    "ind_tr_contract_value",
+    "ind_tr_bidder_id",
     "ind_tr_call_pub",
     "ind_tr_bid_deadline",
     "ind_tr_bid_opening",
-    "ind_tr_prod_code"
+    "ind_tr_award_pub",
+    "ind_tr_prod_code",
+    "ind_tr_buyer_loc",
+    "ind_tr_supplier_loc",
+    "ind_tr_impl_loc",
+    "ind_tr_bidder_loc",
+    "ind_tr_contract_value"
   )
 
   dt[, ind_tr_index := rowMeans(.SD), .SDcols = TR_INDICATOR_VARS]
@@ -201,21 +205,21 @@ calc_openness_indicators <- function(dt) {
   setDT(dt)
 
   # ==================================================
-  # Openness indicators
-  #  1) ind_op_open_proc_method     (0/1) from ind_corr_nonopen_proc_method (0/50/100)
-  #  2) ind_op_nonopen_proc_method  (0/1) from ind_corr_nonopen_proc_method (0/50/100)
-  #  3) ind_op_subm_period          (continuous days) mirrors submp (competitive only)
-  #  4) ind_op_short_subm_period    (0/1) derived from ind_corr_subm_period (0/50/100, competitive only)
+  # Openness indicators 
+  #  1) ind_op_open_proc        (0/1) from ind_corr_nonopen_proc_method (0/50/100)
+  #  2) ind_op_nonopen_proc     (0/1) from ind_corr_nonopen_proc_method (0/50/100)
+  #  3) ind_op_adv_period       (days/NA) mirrors submp (competitive only)
+  #  4) ind_op_short_adv_flag   (0/1/NA) from ind_corr_subm_period (0/50/100, competitive only)
   # ==================================================
 
   # -------------------------
   # 0) Initialize outputs
   # -------------------------
   dt[, `:=`(
-    ind_op_open_proc_method    = NA_integer_,
-    ind_op_nonopen_proc_method = NA_integer_,
-    ind_op_subm_period         = NA_integer_,  # continuous days (submp)
-    ind_op_short_subm_period   = NA_integer_   # 0/1 from ind_corr_subm_period
+    ind_op_open_proc        = NA_integer_,
+    ind_op_nonopen_proc     = NA_integer_,
+    ind_op_adv_period       = NA_integer_,  # continuous days (submp)
+    ind_op_short_adv_flag   = NA_integer_   # 0/1 from ind_corr_subm_period
   )]
 
   # -------------------------
@@ -229,13 +233,13 @@ calc_openness_indicators <- function(dt) {
   # -------------------------
   if ("ind_corr_nonopen_proc_method" %in% names(dt)) {
 
-    dt[, ind_op_open_proc_method := fifelse(
+    dt[, ind_op_open_proc := fifelse(
       is.na(ind_corr_nonopen_proc_method),
       NA_integer_,
       as.integer(as.integer(ind_corr_nonopen_proc_method) == 100L)
     )]
 
-    dt[, ind_op_nonopen_proc_method := fifelse(
+    dt[, ind_op_nonopen_proc := fifelse(
       is.na(ind_corr_nonopen_proc_method),
       NA_integer_,
       as.integer(as.integer(ind_corr_nonopen_proc_method) %in% c(50L, 0L))
@@ -253,19 +257,20 @@ calc_openness_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 3) Submission period (continuous days) mirrors submp, competitive only
+  # 3) Advertisement period (continuous days) mirrors submp, competitive only
+  # (  original logic; only the NAME changed)
   # -------------------------
   if ("submp" %in% names(dt)) {
-    dt[competitive == TRUE, ind_op_subm_period := as.integer(submp)]
+    dt[competitive == TRUE, ind_op_adv_period := as.integer(submp)]
   }
 
   # -------------------------
-  # 4) Short submission period flag (0/1) from ind_corr_subm_period (0/50/100), competitive only
+  # 4) Short advertisement period flag (0/1) from ind_corr_subm_period (0/50/100), competitive only
   #   100 -> 0 (not a red flag)
   #   50 or 0 -> 1 (short / red flag of any level)
   # -------------------------
   if ("ind_corr_subm_period" %in% names(dt)) {
-    dt[competitive == TRUE, ind_op_short_subm_period := fifelse(
+    dt[competitive == TRUE, ind_op_short_adv_flag := fifelse(
       is.na(ind_corr_subm_period),
       NA_integer_,
       as.integer(as.integer(ind_corr_subm_period) %in% c(50L, 0L))
@@ -324,27 +329,34 @@ calc_openness_indicators <- function(dt) {
 }
 
 # --------------------------------------------------
-# 4. Competition indicators
+# 4. Competition indicators  (NAME-ALIGNED VERSION)
 # --------------------------------------------------
+# Keeps existing calculations, but ensures the OUTPUT column names
+# match exactly what   dashboard export script expects:
+#   ind_comp_avg_bids
+#   ind_comp_single_bid
+#   ind_comp_bidder_non_l
+#   ind_comp_foreign_suppliers
+#   ind_comp_tax_haven_suppliers
 
 calc_competition_indicators <- function(dt) {
   setDT(dt)
 
   # -------------------------
-  # 0) Initialize outputs
+  # 0) Initialize outputs ONLY if missing
   # -------------------------
-  dt[, `:=`(
-    ind_comp_avg_bids            = NA_real_,
-    ind_comp_single_bid          = NA_integer_,
-    ind_comp_foreign_supplier    = NA_integer_,
-    ind_comp_bidder_non_l        = NA_integer_,  # from ind_comp_bidder_non_local (0/100)
-    ind_comp_tax_haven_suppliers = NA_integer_
-  )]
+  init_if_missing <- function(name, value) {
+    if (!(name %in% names(dt))) dt[, (name) := value]
+  }
+
+  init_if_missing("ind_comp_avg_bids",            as.numeric(NA))
+  init_if_missing("ind_comp_single_bid",          as.integer(NA))
+  init_if_missing("ind_comp_bidder_non_l",        as.integer(NA))
+  init_if_missing("ind_comp_foreign_suppliers",   as.integer(NA))
+  init_if_missing("ind_comp_tax_haven_suppliers", as.integer(NA))
 
   # -------------------------
-  # Eligibility mask for avg bids + single bidding:
-  #   - Only OPEN procedure tenders
-  #   - (Removed filter: ind_tr_bids_nr_missing == 0)
+  # Eligibility mask: OPEN only (avg bids + single bid)
   # -------------------------
   eligible_open <- rep(FALSE, nrow(dt))
   if ("tender_proceduretype" %in% names(dt)) {
@@ -353,8 +365,7 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 1) Average number of bids (mirror bids count), OPEN rows only
-  # Uses ind_comp_bids_count if present, otherwise bid_number if present
+  # 1) Average number of bids (OPEN only)
   # -------------------------
   bids_col <- if ("ind_comp_bids_count" %in% names(dt)) {
     "ind_comp_bids_count"
@@ -373,13 +384,8 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 2) Single bidding (binary), OPEN rows only
-  # Original ind_corr_singleb coding (your definition):
-  #   100 = more than 1 bid received
-  #     0 = 1 bid received
-  # Desired output:
-  #   1 = single bid (1 bid received)
-  #   0 = not single bid (>1 bid)
+  # 2) Single bidding (OPEN only)
+  #   0 -> 1 (single bid), 100 -> 0 (>1 bid)
   # -------------------------
   if ("ind_corr_singleb" %in% names(dt)) {
     dt[eligible_open == TRUE, ind_comp_single_bid := fifelse(
@@ -391,13 +397,13 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 3) Foreign supplier (1 = bidder_country != tender_country)
+  # 3) Foreign suppliers (ALL rows)
   # -------------------------
   if (all(c("bidder_country", "tender_country") %in% names(dt))) {
     dt[, bidder_country_clean := toupper(trimws(as.character(bidder_country)))]
     dt[, tender_country_clean := toupper(trimws(as.character(tender_country)))]
 
-    dt[, ind_comp_foreign_supplier := fifelse(
+    dt[, ind_comp_foreign_suppliers := fifelse(
       bidder_country_clean == "" | tender_country_clean == "",
       NA_integer_,
       fifelse(
@@ -411,9 +417,8 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 4) Non-local supplier (from 0/100 coding)
-  # Source: ind_comp_bidder_non_local
-  # 100 -> 1, 0 -> 0, NA -> NA, else NA
+  # 4) Non-local supplier (ALL rows)
+  #   100 -> 1, 0 -> 0
   # -------------------------
   if ("ind_comp_bidder_non_local" %in% names(dt)) {
     dt[, ind_comp_bidder_non_l := fifelse(
@@ -425,9 +430,8 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 5) Tax haven supplier flag
-  # Base: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
-  # Output: 1 = tax haven supplier, 0 = not tax haven, NA = unknown
+  # 5) Tax haven supplier (ALL rows)
+  #   0 -> 1 (tax haven), 100 -> 0
   # -------------------------
   if ("ind_corr_taxhaven" %in% names(dt)) {
     dt[, ind_comp_tax_haven_suppliers := fifelse(
@@ -442,6 +446,7 @@ calc_competition_indicators <- function(dt) {
 }
 
 
+
 # --------------------------------------------------
 # 5. Economic performance & value for money
 # --------------------------------------------------
@@ -454,49 +459,44 @@ calc_competition_indicators <- function(dt) {
 # COUNTRY LEVEL CALCULATIONS
 # --------------------------------------------------
 
-# Transparency index inputs (do NOT include benford here, since it's not part of index)
 TR_INDICATOR_VARS <- c(
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
   "ind_tr_supplier_id",
-  "ind_tr_award_pub",
-  "ind_tr_buyer_loc",
-  "ind_tr_supplier_loc",
-  "ind_tr_impl_loc",
-  "ind_tr_contract_value",
+  "ind_tr_bidder_id",
   "ind_tr_call_pub",
   "ind_tr_bid_deadline",
   "ind_tr_bid_opening",
-  "ind_tr_prod_code"
+  "ind_tr_award_pub",
+  "ind_tr_prod_code",
+  "ind_tr_buyer_loc",
+  "ind_tr_supplier_loc",
+  "ind_tr_impl_loc",
+  "ind_tr_bidder_loc",
+  "ind_tr_contract_value"
 )
 
-# All transparency outputs you want tabulated
-# (benford is not in index, but you still might want it in tables/exports)
 IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index", "ind_tr_benford")
 
-# Openness (FINAL names)
 IND_OP_VARS <- c(
-  "ind_op_open_proc_method",
-  "ind_op_nonopen_proc_method",
-  "ind_op_subm_period",
-  "ind_op_short_subm_period"
+  "ind_op_open_proc",
+  "ind_op_nonopen_proc",
+  "ind_op_adv_period",
+  "ind_op_short_adv_flag"
 )
 
-# Admin efficiency (FINAL names)
 IND_ADM_VARS <- c(
   "ind_adm_dec_period",
   "ind_adm_long_dec_flag"
 )
 
-# Competition (include the new non-local recode)
 IND_COMP_VARS <- c(
   "ind_comp_avg_bids",
   "ind_comp_single_bid",
-  "ind_comp_foreign_supplier",
   "ind_comp_bidder_non_l",
+  "ind_comp_foreign_suppliers",
   "ind_comp_tax_haven_suppliers"
 )
-
 
 run_country <- function(cc, data_dir) {
 
@@ -519,7 +519,6 @@ run_country <- function(cc, data_dir) {
   dt <- calc_admin_efficiency_indicators(dt)
   dt <- calc_competition_indicators(dt)
 
-  # Helper: only tabulate vars that exist (prevents errors if a function changes later)
   tabulate_vars <- function(vars, dt) {
     vars_ok <- intersect(vars, names(dt))
     setNames(
@@ -536,7 +535,6 @@ run_country <- function(cc, data_dir) {
     tables_comp = tabulate_vars(IND_COMP_VARS, dt)
   )
 }
-
 
 # --------------------------------------------------
 # Countries
