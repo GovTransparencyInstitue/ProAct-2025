@@ -27,26 +27,25 @@ suppressPackageStartupMessages({
 
 # Load ISO matcher for ISO3 codes
 iso_matcher <- fread("/gti/tmp/ProACT/Utility_datasets/ISO_matcher.csv") # Server PATH
-# iso_matcher <- fread("C:/GTI/TMP/ISO_matcher.csv") # Dani local path
 setnames(iso_matcher, tolower(names(iso_matcher)))
 
-correspondence_table <- readxl::read_excel("/gti/tmp/ProACT/Utility_datasets/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Server PATH
-# correspondence_table <- readxl::read_excel("C:/GTI/TMP/Correspondence_table_UNDP2025.xlsx", sheet = "cpv_labels") # Dani local path
+correspondence_table <- readxl::read_excel(
+  "/gti/tmp/ProACT/Utility_datasets/Correspondence_table_UNDP2025.xlsx",
+  sheet = "cpv_labels"
+)
 correspondence_table <- as.data.table(correspondence_table)
 
 # Load indicator names lookup table
 ind_names_lookup <- readxl::read_excel(
   "/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx"
 )
-# ind_names_lookup <- readxl::read_excel("C:/GTI/ProACT 2025/Data/Util/Short_Ind_names.xlsx") # Dani local path
-
 ind_names_lookup <- as.data.table(ind_names_lookup)
-setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace spaces with underscores in column names
+setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace spaces with underscores
 
 # ---------- CLI ----------
 opt_list <- list(
-  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 3"),  # Dani local path --> Change to your PATH
-  make_option(c("--output-dir"), type="character", default="/var/tmp/ivana/export_dashboard ready"),  # Dani local path --> Change to your PATH
+  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 3"),
+  make_option(c("--output-dir"), type="character", default="/var/tmp/ivana/export_dashboard ready"),
   make_option(c("--output-subdir"), type="character", default=format(Sys.Date(), "%m%d")),
   make_option(c("--verbose"), action="store_true", default=FALSE)
 )
@@ -65,7 +64,6 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 vcat("Output: %s", out_dir)
 
 # ---------- Indicators lists ----------
-# New indicators list (for future use)
 list_of_indicators_new <- c(
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
@@ -101,31 +99,111 @@ list_of_indicators_new <- c(
   "ind_impl_cost_overrun",
   "ind_impl_time_overrun"
 )
-
-# Set active indicators list
 list_of_indicators <- list_of_indicators_new
 
 ## --------------------------------------------------
-## CHANGE (25% rule): global missingness threshold
-## - Keep indicator in a given group+tier only if missing_share <= 25%
+## CHANGE (A1): Missingness threshold updated to 30% 
 ## --------------------------------------------------
-MISSINGNESS_THRESHOLD <- 0.25
+MISSINGNESS_THRESHOLD <- 0.30
+
+## --------------------------------------------------
+## CHANGE (A2): Eligibility masks for sample-restricted indicators
+## - Missingness is computed ONLY among eligible observations.
+## - This prevents penalizing NA created by sample restrictions upstream.
+## --------------------------------------------------
+
+get_proc_flags <- function(dt) {
+  proc_clean <- if ("tender_proceduretype" %in% names(dt)) {
+    toupper(trimws(as.character(dt$tender_proceduretype)))
+  } else {
+    rep(NA_character_, nrow(dt))
+  }
+  list(
+    open = !is.na(proc_clean) & proc_clean == "OPEN",
+    competitive = !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
+  )
+}
+
+# NOTE: adjust these lists if your upstream "restriction-to-NA" logic differs.
+IND_COMPETITIVE_ONLY <- c(
+  "ind_tr_bidder_id",
+  "ind_tr_call_pub",
+  "ind_tr_bid_deadline",
+  "ind_tr_bid_opening",
+  "ind_tr_bidder_loc",
+  "ind_comp_avg_bids",
+  "ind_comp_single_bid",
+  "ind_comp_new_suppliers",
+  "ind_comp_sector_concentration",
+  "ind_comp_bidder_non_l",
+  "ind_comp_foreign_suppliers",
+  "ind_comp_tax_haven_suppliers"
+)
+
+IND_OPEN_ONLY <- c(
+  "ind_op_open_proc",
+  "ind_op_nonopen_proc",
+  "ind_op_adv_period",
+  "ind_op_short_adv_flag"
+)
+
+indicator_eligible_mask <- function(dt, indicator) {
+  flags <- get_proc_flags(dt)
+  if (indicator %in% IND_COMPETITIVE_ONLY) return(flags$competitive)
+  if (indicator %in% IND_OPEN_ONLY)        return(flags$open)
+  rep(TRUE, nrow(dt))
+}
 
 ## ProACT Dashboard Export Function ####
 
-# Modified function to calculate aggregate values with HIGH/MED/LOW tiers
-# Handles missing price data by creating NA rows
+## --------------------------------------------------
+## CHANGE (A3): calculate_proact_aggregates now:
+## - keeps Dani-style tiers ALWAYS (no dropping)
+## - computes missing_share ONLY within eligible sample
+## - outputs ONLY 2 new columns: missing_share, passes_missingness_30
+##   (removes Ivana's extra n_eligible/n_non_missing from final schema)
+## --------------------------------------------------
 calculate_proact_aggregates <- function(dt, indicator) {
-  # Ensure dt is a data.table
-  if (!is.data.table(dt)) {
-    dt <- as.data.table(dt)
-  }
-  
-  # Check if bid_priceusd column exists and has any data
+  if (!is.data.table(dt)) dt <- as.data.table(dt)
+
   has_price_data <- "bid_priceusd" %in% names(dt) && sum(!is.na(dt$bid_priceusd)) > 0
-  
+
+  calc_stats <- function(subset_dt) {
+    if (nrow(subset_dt) == 0) {
+      return(list(
+        mean_val = NA_real_,
+        numerator = NA_integer_,
+        denominator = NA_integer_,
+        n_obs = 0L,
+        total_value = NA_real_,
+        missing_share = NA_real_,
+        passes = 0L
+      ))
+    }
+
+    elig <- indicator_eligible_mask(subset_dt, indicator)
+    n_eligible <- sum(elig, na.rm = TRUE)
+
+    # Non-missing among eligible
+    n_non_missing <- if (n_eligible == 0) 0L else sum(!is.na(subset_dt[[indicator]]) & elig)
+
+    miss_share <- if (n_eligible == 0) NA_real_ else (n_eligible - n_non_missing) / n_eligible
+    passes <- if (!is.na(miss_share) && miss_share <= MISSINGNESS_THRESHOLD) 1L else 0L
+
+    vals <- subset_dt[[indicator]]
+
+    list(
+      mean_val = if (n_eligible == 0) NA_real_ else mean(vals[elig], na.rm = TRUE),
+      numerator = if (n_eligible == 0) NA_integer_ else sum(vals[elig] == 1, na.rm = TRUE),
+      denominator = n_non_missing,              # eligible+observed for indicator
+      n_obs = nrow(subset_dt),                  # tier sample size (Dani-style)
+      total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1e6,
+      missing_share = miss_share,
+      passes = passes
+    )
+  }
+
   if (!has_price_data) {
-    # No price data - return NA rows for all three tiers
     return(data.table(
       Indicator = indicator,
       Contract_value = c("HIGH", "MED", "LOW"),
@@ -134,68 +212,19 @@ calculate_proact_aggregates <- function(dt, indicator) {
       All_contracts = rep(NA_integer_, 3),
       n_observations = rep(NA_integer_, 3),
       Total_contract_value_million_usd = rep(NA_real_, 3),
-      
-      # CHANGE (25% rule): availability metadata for filtering
-      n_eligible = rep(NA_integer_, 3),
-      n_non_missing = rep(NA_integer_, 3),
+
+      # CHANGE (A3): Dani-style + minimal additions
       missing_share = rep(NA_real_, 3),
-      passes_missingness_25 = rep(0L, 3)
+      passes_missingness_30 = rep(0L, 3)
     ))
   }
-  
-  # Has price data - sort and calculate normally
+
   setorder(dt, -bid_priceusd)
-  
-  # Helper function to calculate statistics for a subset
-  calc_stats <- function(subset_dt) {
-    if (nrow(subset_dt) == 0) {
-      return(list(
-        mean_val = NA_real_,
-        numerator = NA_integer_,
-        denominator = NA_integer_,
-        n_obs = NA_integer_,
-        total_value = NA_real_,
-        
-        # CHANGE (25% rule)
-        n_eligible = 0L,
-        n_non_missing = 0L,
-        missing_share = NA_real_,
-        passes_missingness_25 = 0L
-      ))
-    }
-    
-    # non-missing count for the indicator in this tier sample
-    non_missing <- sum(!is.na(subset_dt[[indicator]]))
-    
-    # missing share computed over the tier sample size (after your upstream filters)
-    miss_share <- (nrow(subset_dt) - non_missing) / nrow(subset_dt)
-    passes <- if (!is.na(miss_share) && miss_share <= MISSINGNESS_THRESHOLD) 1L else 0L
-    
-    list(
-      mean_val = mean(subset_dt[[indicator]], na.rm = TRUE),
-      numerator = sum(subset_dt[[indicator]] == 1, na.rm = TRUE),
-      denominator = non_missing,     # eligible observations for indicator aggregation
-      n_obs = nrow(subset_dt),       # tier sample size
-      total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1000000,
-      
-      # CHANGE (25% rule)
-      n_eligible = nrow(subset_dt),
-      n_non_missing = non_missing,
-      missing_share = miss_share,
-      passes_missingness_25 = passes
-    )
-  }
-  
-  # Calculate for HIGH contracts (>= 5,000,000)
+
   high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 5000000])
-  
-  # Calculate for MED contracts (>= 500,000 and < 5,000,000)
-  med_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
-  
-  # Calculate for LOW contracts (< 500,000)
-  low_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
-  
-  # Return results as data.table
+  med_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
+  low_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
+
   data.table(
     Indicator = indicator,
     Contract_value = c("HIGH", "MED", "LOW"),
@@ -204,71 +233,55 @@ calculate_proact_aggregates <- function(dt, indicator) {
     All_contracts = c(high_stats$denominator, med_stats$denominator, low_stats$denominator),
     n_observations = c(high_stats$n_obs, med_stats$n_obs, low_stats$n_obs),
     Total_contract_value_million_usd = round(c(high_stats$total_value, med_stats$total_value, low_stats$total_value), 2),
-    
-    # CHANGE (25% rule)
-    n_eligible = c(high_stats$n_eligible, med_stats$n_eligible, low_stats$n_eligible),
-    n_non_missing = c(high_stats$n_non_missing, med_stats$n_non_missing, low_stats$n_non_missing),
+
+    # CHANGE (A3): minimal additions
     missing_share = c(high_stats$missing_share, med_stats$missing_share, low_stats$missing_share),
-    passes_missingness_25 = c(high_stats$passes_missingness_25, med_stats$passes_missingness_25, low_stats$passes_missingness_25)
+    passes_missingness_30 = c(high_stats$passes, med_stats$passes, low_stats$passes)
   )
 }
 
 # III. Load and process files ####
-
 files_to_load <- list.files(opt$`input-dir`, pattern="_export\\.csv$", full.names=TRUE, recursive = TRUE)
 stopifnot(length(files_to_load) > 0)
 
-# Select most recent file per country
 file_info <- data.table(
   filepath = files_to_load,
   filename = basename(files_to_load)
 )
-
-# Extract country code (first 2 chars)
 file_info[, country_code := substr(filename, 1, 2)]
 
-# If there are date stamps in filenames, keep most recent; otherwise keep all
 if (any(grepl("\\d{8}", file_info$filename))) {
   file_info[, date_str := sub(".*_(\\d{8})_.*", "\\1", filename)]
   file_info <- file_info[order(-date_str)]
   file_info <- file_info[, .SD[1], by = country_code]
 }
 
-# Sort alphabetically by country code
 file_info <- file_info[order(country_code)]
 files_to_load <- file_info$filepath
-
 vcat("Selected %d files", length(files_to_load))
-
-## Process all countries ####
 
 proact_export_all <- list()
 
 ## --------------------------------------------------
-## DIAGNOSTICS (requested): collectors across countries
-## - adv/submission period by country x (OPEN) x value tier
-## - bid_priceusd: fixed tiers + tertiles counts (ALL and OPEN)
+## DIAGNOSTICS collectors across countries
 ## --------------------------------------------------
-adv_period_diag_all  <- list()
+adv_period_diag_all   <- list()
 price_tier_counts_all <- list()
 price_tertiles_all    <- list()
 
-## Optional: keep track of missing/available indicators per country (helps debugging)
 available_indicators_by_country <- list()
 missing_indicators_by_country   <- list()
 
 for (file_path in files_to_load) {
-  
+
   cat(sprintf("\n=== Processing: %s ===\n", basename(file_path)))
-  
-  # Load CSV file
+
   df <- fread(file_path)
   cat(sprintf("  Loaded %d rows, %d columns\n", nrow(df), ncol(df)))
-  
+
   # ---- DROP DUPLICATED LOGICAL COLUMNS (KEEP FIRST) ----
   base_names <- sub("\\..*$", "", names(df))
   dup_base <- base_names[duplicated(base_names)]
-  
   if (length(dup_base) > 0) {
     warning(sprintf(
       "Dropping duplicated columns (keeping first): %s",
@@ -277,28 +290,22 @@ for (file_path in files_to_load) {
     keep <- !duplicated(base_names)
     df <- df[, ..keep]
   }
-  
+
   # Extract country code from tender_country column (ISO2)
   if (!"tender_country" %in% names(df)) {
     stop(sprintf("Column 'tender_country' not found in file: %s\nAvailable columns: %s",
                  basename(file_path), paste(head(names(df), 10), collapse=", ")))
   }
-  
-  # Get unique country code (should be consistent within file)
+
   country_codes <- unique(df$tender_country)
-  country_codes <- country_codes[!is.na(country_codes)]  # Remove NAs
-  
-  if (length(country_codes) == 0) {
-    stop(sprintf("No valid country codes found in tender_country column for file: %s", basename(file_path)))
-  }
-  
+  country_codes <- country_codes[!is.na(country_codes)]
+  if (length(country_codes) == 0) stop(sprintf("No valid country codes found in tender_country column for file: %s", basename(file_path)))
   if (length(country_codes) > 1) {
     warning(sprintf("Multiple country codes found in %s: %s. Using first one.",
                     basename(file_path), paste(country_codes, collapse=", ")))
   }
   country_code <- country_codes[1]
-  
-  # Get country name from ISO matcher
+
   country_match <- iso_matcher[iso2 == country_code]
   if (nrow(country_match) == 0) {
     warning(sprintf("Country code '%s' not found in ISO matcher. Using code as name.", country_code))
@@ -306,9 +313,9 @@ for (file_path in files_to_load) {
   } else {
     country_name <- country_match$country[1]
   }
-  
+
   cat(sprintf("  Country: %s (%s)\n", country_name, country_code))
-  
+
   # Create tender_year from date columns with fallback logic
   date_cols <- c(
     "tender_publications_firstdcontractawarddate",
@@ -317,169 +324,118 @@ for (file_path in files_to_load) {
     "tender_biddeadline",
     "tender_publications_firstcallfortenderdate"
   )
-  
-  # Robust date parsing function that handles multiple formats and Date objects
+
   parse_date_robust <- function(x) {
     if (is.null(x) || length(x) == 0) return(as.Date(NA))
-    
-    # If already Date object, return as-is
     if (inherits(x, "Date")) return(x)
-    
-    # If POSIXct/POSIXlt, convert to Date
     if (inherits(x, c("POSIXct", "POSIXlt"))) return(as.Date(x))
-    
-    # If numeric (Excel date serial), convert
     if (is.numeric(x)) return(as.Date(x, origin = "1899-12-30"))
-    
-    # Convert to character for parsing
     x_char <- as.character(x)
-    
-    # Try multiple formats in order of likelihood
-    parsed <- suppressWarnings(mdy(x_char))  # MM/DD/YYYY or M/D/YYYY
-    if (all(is.na(parsed))) {
-      parsed <- suppressWarnings(dmy(x_char))  # DD/MM/YYYY or D/M/YYYY
-    }
-    if (all(is.na(parsed))) {
-      parsed <- suppressWarnings(ymd(x_char))  # YYYY-MM-DD
-    }
-    if (all(is.na(parsed))) {
-      parsed <- suppressWarnings(as.Date(x_char))  # Standard R date parsing
-    }
-    
-    return(parsed)
+    parsed <- suppressWarnings(mdy(x_char))
+    if (all(is.na(parsed))) parsed <- suppressWarnings(dmy(x_char))
+    if (all(is.na(parsed))) parsed <- suppressWarnings(ymd(x_char))
+    if (all(is.na(parsed))) parsed <- suppressWarnings(as.Date(x_char))
+    parsed
   }
-  
-  # Parse all date columns with robust parsing
+
   for (col in date_cols) {
     if (col %in% names(df)) {
       parsed_col_name <- paste0(col, "_parsed")
       df[, (parsed_col_name) := parse_date_robust(get(col))]
-      
-      # Log parsing success rate
       success_rate <- sum(!is.na(df[[parsed_col_name]])) / nrow(df) * 100
       if (success_rate < 50) {
         cat(sprintf("  WARNING: %s has low parse rate (%.1f%% successful)\n", col, success_rate))
       }
     }
   }
-  
-  # Create tender_year with fallback logic
+
   df[, tender_year := NA_integer_]
-  
   if ("tender_publications_firstdcontractawarddate_parsed" %in% names(df)) {
-    df[is.na(tender_year),
-       tender_year := year(tender_publications_firstdcontractawarddate_parsed)]
+    df[is.na(tender_year), tender_year := year(tender_publications_firstdcontractawarddate_parsed)]
   }
-  
   if ("tender_contractsignaturedate_parsed" %in% names(df)) {
-    df[is.na(tender_year),
-       tender_year := year(tender_contractsignaturedate_parsed)]
+    df[is.na(tender_year), tender_year := year(tender_contractsignaturedate_parsed)]
   }
-  
   if ("tender_awarddecisiondate_parsed" %in% names(df)) {
-    df[is.na(tender_year),
-       tender_year := year(tender_awarddecisiondate_parsed)]
+    df[is.na(tender_year), tender_year := year(tender_awarddecisiondate_parsed)]
   }
-  
   if ("tender_biddeadline_parsed" %in% names(df)) {
-    df[is.na(tender_year),
-       tender_year := year(tender_biddeadline_parsed)]
+    df[is.na(tender_year), tender_year := year(tender_biddeadline_parsed)]
   }
-  
   if ("tender_publications_firstcallfortenderdate_parsed" %in% names(df)) {
-    df[is.na(tender_year),
-       tender_year := year(tender_publications_firstcallfortenderdate_parsed)]
+    df[is.na(tender_year), tender_year := year(tender_publications_firstcallfortenderdate_parsed)]
   }
-  
-  # Log tender_year creation success
+
   year_success_rate <- sum(!is.na(df$tender_year)) / nrow(df) * 100
   cat(sprintf("  tender_year created: %.1f%% of rows have valid year\n", year_success_rate))
-  
-  # Remove temporary parsed date columns
+
   parsed_cols <- paste0(date_cols, "_parsed")
   df[, (parsed_cols) := NULL]
-  
-  # Log row counts before filtering
+
   rows_before <- nrow(df)
   cat(sprintf("  Rows before year filter: %d\n", rows_before))
-  
-  # Filter years between 2000 and 2020
+
   df <- df[tender_year >= 2000 & tender_year <= 2020]
-  
-  # Log row counts after filtering
+
   rows_after <- nrow(df)
   cat(sprintf("  Rows after year filter (2000-2020): %d (%.1f%% retained)\n",
               rows_after, rows_after/rows_before*100))
-  
+
   if (rows_after == 0) {
     warning(sprintf("NO ROWS REMAINING after year filter for %s! Check date columns.", country_code))
     cat("  Year distribution in original data:\n")
     print(table(df[, tender_year], useNA = "ifany"))
-    next  # Skip this country
+    next
   }
-  
+
   vcat("  Year distribution: %s", paste(names(table(df$tender_year)), collapse=", "))
-  
-  # Process lot_productcode to get product_market_short_name
+
+  # Process lot_productcode -> product_market_short_name
   if ("lot_productcode" %in% names(df)) {
-    # Check for NA values
     na_count <- sum(is.na(df$lot_productcode))
     cat(sprintf("  lot_productcode: %d non-NA (%.1f%%)\n",
                 nrow(df) - na_count, (nrow(df) - na_count)/nrow(df)*100))
-    
-    # Extract first 2 characters
+
     df[, cpv_first2 := substr(as.character(lot_productcode), 1, 2)]
-    
-    # Convert to numeric (handles "03" -> 3, "09" -> 9, etc.)
     df[, cpv_code_numeric := suppressWarnings(as.numeric(cpv_first2))]
-    
-    # Count how many can be matched
     matchable <- sum(!is.na(df$cpv_code_numeric))
     cat(sprintf("  Matchable CPV codes: %d (%.1f%%)\n",
                 matchable, matchable/nrow(df)*100))
-    
-    # Merge with correspondence table
+
     df <- merge(df,
                 correspondence_table[, .(cpv_code, product_market_short_name)],
                 by.x = "cpv_code_numeric",
                 by.y = "cpv_code",
                 all.x = TRUE,
                 sort = FALSE)
-    
-    # Count successful matches
+
     matched <- sum(!is.na(df$product_market_short_name))
     cat(sprintf("  Matched to markets: %d (%.1f%%)\n",
                 matched, matched/nrow(df)*100))
-    
-    # Clean up temporary columns
+
     df[, c("cpv_first2", "cpv_code_numeric") := NULL]
-    
   } else {
     warning("Column 'lot_productcode' not found. Creating NA product_market_short_name.")
     df[, product_market_short_name := NA_character_]
   }
-  
-  # Handle tender_supplytype column
+
+  # Handle tender_supplytype
   if (!"tender_supplytype" %in% names(df)) {
     warning(sprintf("Column 'tender_supplytype' not found in %s. Creating NA column.", country_code))
     cat("  ? tender_supplytype: COLUMN NOT FOUND - all values will be NA\n")
     df[, tender_supplytype := NA_character_]
   } else {
-    # Standardize supply type values to capital case (First letter uppercase, rest lowercase)
     df[, tender_supplytype := str_to_title(as.character(tender_supplytype))]
-    
-    # Log supply type statistics
     supplytype_na <- sum(is.na(df$tender_supplytype))
     supplytype_available <- nrow(df) - supplytype_na
-    
+
     if (supplytype_available == 0) {
       cat(sprintf("  ? tender_supplytype: 0 non-NA (0%%) - all values are NA\n"))
     } else {
       cat(sprintf("  ? tender_supplytype: %s non-NA (%.1f%%)\n",
                   format(supplytype_available, big.mark=","),
                   (supplytype_available/nrow(df)*100)))
-      
-      # Show distribution across supply types
+
       supply_dist <- table(df$tender_supplytype, useNA = "ifany")
       cat(sprintf("    Distribution: "))
       for (i in seq_along(supply_dist)) {
@@ -494,23 +450,21 @@ for (file_path in files_to_load) {
       cat("\n")
     }
   }
-  
-  # Handle bid_priceusd column
+
+  # Handle bid_priceusd
   if (!"bid_priceusd" %in% names(df)) {
     warning(sprintf("Column 'bid_priceusd' not found in %s. All price tiers will be NA.", country_code))
     cat("  ? bid_priceusd: COLUMN NOT FOUND - price tiers will be NA\n")
     df[, bid_priceusd := NA_real_]
   } else {
-    # Fix integer overflow by converting to numeric
     if (is.integer(df$bid_priceusd)) {
       cat(sprintf("  Converting bid_priceusd to numeric for country %s\n", country_code))
       df[, bid_priceusd := as.numeric(bid_priceusd)]
     }
-    
-    # Log price statistics
+
     price_na <- sum(is.na(df$bid_priceusd))
     price_available <- nrow(df) - price_na
-    
+
     if (price_available == 0) {
       cat(sprintf("  ? bid_priceusd: 0 non-NA (0%%) - ALL price tiers will be NA\n"))
     } else {
@@ -518,45 +472,42 @@ for (file_path in files_to_load) {
                   format(price_available, big.mark=","),
                   (price_available/nrow(df)*100),
                   format(round(median(df$bid_priceusd, na.rm=TRUE)), big.mark=",")))
-      
-      # Show distribution across price tiers
+
       high_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 5000000)
       med_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 500000 & df$bid_priceusd < 5000000)
       low_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd < 500000)
-      
+
       cat(sprintf("    HIGH (=$5M): %s (%.1f%%), MED ($500K-$5M): %s (%.1f%%), LOW (<$500K): %s (%.1f%%)\n",
                   format(high_count, big.mark=","), high_count/price_available*100,
                   format(med_count, big.mark=","), med_count/price_available*100,
                   format(low_count, big.mark=","), low_count/price_available*100))
     }
   }
-  
-  # Add Country and Country_code columns
+
+  # Add Country and Country_code
   df[, Country := country_name]
   df[, Country_code := country_code]
-  
+
   cat(sprintf("  Data ready for aggregation: %s rows\n", format(nrow(df), big.mark=",")))
-  
-  # Log market distribution before aggregation
+
   na_markets <- sum(is.na(df$product_market_short_name))
   if (na_markets > 0) {
     cat(sprintf("  Note: %s rows (%.1f%%) have NA product_market_short_name\n",
                 format(na_markets, big.mark=","),
                 na_markets/nrow(df)*100))
   }
-  
-  # Check which indicators are available (print once per country, not per group)
+
   available_indicators <- intersect(list_of_indicators, names(df))
   missing_indicators <- setdiff(list_of_indicators, names(df))
-  
+
   available_indicators_by_country[[country_code]] <- available_indicators
   missing_indicators_by_country[[country_code]] <- missing_indicators
-  
+
   if (length(available_indicators) == 0) {
     warning(sprintf("No indicators found in data for %s!", country_code))
-    next  # Skip this country
+    next
   }
-  
+
   if (length(missing_indicators) > 0) {
     cat(sprintf("  Skipping %d missing indicators: %s\n",
                 length(missing_indicators),
@@ -565,24 +516,28 @@ for (file_path in files_to_load) {
       cat(sprintf("    ... and %d more\n", length(missing_indicators) - 3))
     }
   }
-  
+
   # --------------------------------------------------
-  # DIAGNOSTICS (requested) — compute per-country AFTER core cleaning
-  # 1) Advertisement/Submission period stats (OPEN only) by HIGH/MED/LOW
-  #    - Uses ind_op_adv_period if present, otherwise ind_op_subm_period if present
-  # 2) bid_priceusd checks:
-  #    - fixed tiers counts (ALL and OPEN)
-  #    - tertiles counts (ALL and OPEN) + cutpoints
+  # DIAGNOSTICS — compute per-country AFTER core cleaning
   # --------------------------------------------------
-  
-  # OPEN procedure mask
+
+  # OPEN mask
   open_mask <- rep(NA, nrow(df))
   if ("tender_proceduretype" %in% names(df)) {
     proc_clean <- toupper(trimws(as.character(df$tender_proceduretype)))
     open_mask <- !is.na(proc_clean) & proc_clean == "OPEN"
   }
-  
-  # Contract value tier label (based on bid_priceusd)
+
+  ## --------------------------------------------------
+  ## CHANGE (B1): Add COMPETITIVE mask (OPEN + RESTRICTED)
+  ## --------------------------------------------------
+  competitive_mask <- rep(NA, nrow(df))
+  if ("tender_proceduretype" %in% names(df)) {
+    proc_clean <- toupper(trimws(as.character(df$tender_proceduretype)))
+    competitive_mask <- !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
+  }
+
+  # Contract value tier label
   if ("bid_priceusd" %in% names(df) && sum(!is.na(df$bid_priceusd)) > 0) {
     df[, contract_value_tier := fifelse(
       is.na(bid_priceusd), NA_character_,
@@ -592,15 +547,15 @@ for (file_path in files_to_load) {
   } else {
     df[, contract_value_tier := NA_character_]
   }
-  
-  # 1) Adv/submission period diagnostics
+
+  # 1) Adv/submission period diagnostics (OPEN only)
   adv_period_var <- NA_character_
   if ("ind_op_adv_period" %in% names(df)) {
     adv_period_var <- "ind_op_adv_period"
   } else if ("ind_op_subm_period" %in% names(df)) {
     adv_period_var <- "ind_op_subm_period"
   }
-  
+
   if (!is.na(adv_period_var) && any(open_mask == TRUE, na.rm = TRUE) && any(!is.na(df$contract_value_tier))) {
     tmp_adv <- df[open_mask == TRUE & !is.na(contract_value_tier),
                   .(
@@ -629,16 +584,19 @@ for (file_path in files_to_load) {
       sd_period = NA_real_
     )
   }
-  
-  # 2a) Fixed tiers counts (ALL vs OPEN)
+
+  # 2a) Fixed tiers counts (ALL vs OPEN vs COMPETITIVE)
   if ("bid_priceusd" %in% names(df) && sum(!is.na(df$bid_priceusd)) > 0) {
-    # counts among rows with price (so percent is meaningful)
     df_price <- df[!is.na(bid_priceusd)]
     df_price[, scope := "ALL"]
-    
+
     df_price_open <- df[open_mask == TRUE & !is.na(bid_priceusd)]
     df_price_open[, scope := "OPEN"]
-    
+
+    ## CHANGE (B2): Competitive price subset
+    df_price_comp <- df[competitive_mask == TRUE & !is.na(bid_priceusd)]
+    df_price_comp[, scope := "COMPETITIVE"]
+
     count_tiers <- function(dtx) {
       data.table(
         n_price = nrow(dtx),
@@ -647,20 +605,22 @@ for (file_path in files_to_load) {
         n_low  = sum(dtx$bid_priceusd < 500000)
       )
     }
-    
+
     tiers_all  <- count_tiers(df_price)
     tiers_open <- if (nrow(df_price_open) > 0) count_tiers(df_price_open) else data.table(n_price=0, n_high=0, n_med=0, n_low=0)
-    
+    tiers_comp <- if (nrow(df_price_comp) > 0) count_tiers(df_price_comp) else data.table(n_price=0, n_high=0, n_med=0, n_low=0)
+
     tmp_tiers <- rbind(
-      cbind(data.table(Country=country_name, Country_code=country_code, scope="ALL"),  tiers_all),
-      cbind(data.table(Country=country_name, Country_code=country_code, scope="OPEN"), tiers_open)
+      cbind(data.table(Country=country_name, Country_code=country_code, scope="ALL"),         tiers_all),
+      cbind(data.table(Country=country_name, Country_code=country_code, scope="OPEN"),        tiers_open),
+      cbind(data.table(Country=country_name, Country_code=country_code, scope="COMPETITIVE"), tiers_comp)
     )
     price_tier_counts_all[[country_code]] <- tmp_tiers
-    
-    # 2b) Tertiles counts (ALL vs OPEN) + cutpoints
+
+    # 2b) Tertiles counts (ALL vs OPEN vs COMPETITIVE) + cutpoints
     x_all <- df_price$bid_priceusd
     q_all <- as.numeric(quantile(x_all, probs = c(1/3, 2/3), na.rm = TRUE, type = 7))
-    
+
     df_price[, tertile := fifelse(
       bid_priceusd <= q_all[1], 1L,
       fifelse(bid_priceusd <= q_all[2], 2L, 3L)
@@ -668,12 +628,12 @@ for (file_path in files_to_load) {
     tert_all <- df_price[, .(n = .N), by = .(Country, Country_code, scope, tertile)]
     tert_all[, tertile_cut_33 := q_all[1]]
     tert_all[, tertile_cut_66 := q_all[2]]
-    
+
     tert_open <- NULL
     if (nrow(df_price_open) > 0) {
       x_open <- df_price_open$bid_priceusd
       q_open <- as.numeric(quantile(x_open, probs = c(1/3, 2/3), na.rm = TRUE, type = 7))
-      
+
       df_price_open[, tertile := fifelse(
         bid_priceusd <= q_open[1], 1L,
         fifelse(bid_priceusd <= q_open[2], 2L, 3L)
@@ -682,15 +642,30 @@ for (file_path in files_to_load) {
       tert_open[, tertile_cut_33 := q_open[1]]
       tert_open[, tertile_cut_66 := q_open[2]]
     }
-    
-    tmp_tertiles <- rbindlist(list(tert_all, tert_open), fill = TRUE)
+
+    ## CHANGE (B3): Competitive tertiles
+    tert_comp <- NULL
+    if (nrow(df_price_comp) > 0) {
+      x_comp <- df_price_comp$bid_priceusd
+      q_comp <- as.numeric(quantile(x_comp, probs = c(1/3, 2/3), na.rm = TRUE, type = 7))
+
+      df_price_comp[, tertile := fifelse(
+        bid_priceusd <= q_comp[1], 1L,
+        fifelse(bid_priceusd <= q_comp[2], 2L, 3L)
+      )]
+      tert_comp <- df_price_comp[, .(n = .N), by = .(Country, Country_code, scope, tertile)]
+      tert_comp[, tertile_cut_33 := q_comp[1]]
+      tert_comp[, tertile_cut_66 := q_comp[2]]
+    }
+
+    tmp_tertiles <- rbindlist(list(tert_all, tert_open, tert_comp), fill = TRUE)
     setcolorder(tmp_tertiles, c("Country","Country_code","scope","tertile_cut_33","tertile_cut_66","tertile","n"))
     price_tertiles_all[[country_code]] <- tmp_tertiles
   } else {
     price_tier_counts_all[[country_code]] <- data.table(
       Country = country_name,
       Country_code = country_code,
-      scope = c("ALL","OPEN"),
+      scope = c("ALL","OPEN","COMPETITIVE"),
       n_price = NA_integer_,
       n_high = NA_integer_,
       n_med = NA_integer_,
@@ -699,59 +674,65 @@ for (file_path in files_to_load) {
     price_tertiles_all[[country_code]] <- data.table(
       Country = country_name,
       Country_code = country_code,
-      scope = c("ALL","OPEN"),
+      scope = c("ALL","OPEN","COMPETITIVE"),
       tertile_cut_33 = NA_real_,
       tertile_cut_66 = NA_real_,
       tertile = NA_integer_,
       n = NA_integer_
     )
   }
-  
-  # Calculate ProACT aggregates grouped by Country, tender_year, product_market_short_name, tender_supplytype
+
+  # Calculate ProACT aggregates grouped by Country, year, market, supply type
   proact_export <- df[, {
     rbindlist(lapply(available_indicators, function(ind) {
       calculate_proact_aggregates(.SD, ind)
     }))
   }, by = .(Country, Country_code, tender_year, product_market_short_name, tender_supplytype)]
-  
-  # Add Indicator_availability_filter column
-  proact_export[, Indicator_availability_filter := fifelse(is.na(Indicator_value), 0L, 1L)]
-  
-  # CHANGE (25% rule): remove indicator rows that fail the 25% missingness threshold
-  rows_before_filter <- nrow(proact_export)
-  proact_export <- proact_export[passes_missingness_25 == 1L]
-  rows_after_filter <- nrow(proact_export)
-  if (rows_after_filter < rows_before_filter) {
-    cat(sprintf("  25%% missingness filter: dropped %s rows (%.1f%%)\n",
-                format(rows_before_filter - rows_after_filter, big.mark=","),
-                (rows_before_filter - rows_after_filter) / rows_before_filter * 100))
+
+  ## --------------------------------------------------
+  ## CHANGE (A4): Do NOT drop rows failing missingness.
+  ## Instead: redefine Indicator_availability_filter to require:
+  ##  - indicator value exists AND
+  ##  - passes_missingness_30 == 1
+  ## This preserves full output like Dani, but enables "hide" in dashboard.
+  ## --------------------------------------------------
+  proact_export[, Indicator_availability_filter := fifelse(
+    !is.na(Indicator_value) & passes_missingness_30 == 1L,
+    1L, 0L
+  )]
+
+  ## --------------------------------------------------
+  ## CHANGE (A5): Console log missingness failures per country (requested)
+  ## --------------------------------------------------
+  fail_n <- proact_export[!is.na(missing_share) & passes_missingness_30 == 0L, .N]
+  if (fail_n > 0) {
+    cat(sprintf("  Missingness>30%%: %s rows flagged (not dropped)\n", format(fail_n, big.mark=",")))
+  } else {
+    cat("  Missingness>30%: none flagged\n")
   }
-  
-  # Log aggregation results
+
+  # Log aggregation results (same style)
   na_market_rows <- sum(is.na(proact_export$product_market_short_name))
   if (na_market_rows > 0) {
     cat(sprintf("  Note: %s output rows (%.1f%%) have NA product_market_short_name\n",
                 format(na_market_rows, big.mark=","),
                 na_market_rows/nrow(proact_export)*100))
   }
-  
+
   na_supplytype_rows <- sum(is.na(proact_export$tender_supplytype))
   if (na_supplytype_rows > 0) {
     cat(sprintf("  Note: %s output rows (%.1f%%) have NA tender_supplytype\n",
                 format(na_supplytype_rows, big.mark=","),
                 na_supplytype_rows/nrow(proact_export)*100))
   }
-  
-  # Show data availability
+
   available_rows <- sum(proact_export$Indicator_availability_filter == 1)
-  cat(sprintf("  Data availability: %s rows with data (%.1f%%), %s rows NA (%.1f%%)\n",
+  cat(sprintf("  Data availability (after filter flag): %s rows flagged as available (%.1f%%)\n",
               format(available_rows, big.mark=","),
-              available_rows/nrow(proact_export)*100,
-              format(nrow(proact_export) - available_rows, big.mark=","),
-              (nrow(proact_export) - available_rows)/nrow(proact_export)*100))
-  
+              available_rows/nrow(proact_export)*100))
+
   proact_export_all[[country_code]] <- proact_export
-  
+
   cat(sprintf("  ? Completed %s: Generated %s rows of aggregated data\n",
               country_code,
               format(nrow(proact_export), big.mark=",")))
@@ -770,16 +751,18 @@ fwrite(adv_period_diag, adv_outfile)
 cat(sprintf("  Wrote: %s\n", adv_outfile))
 
 price_tier_counts <- rbindlist(price_tier_counts_all, fill = TRUE)
-price_tier_outfile <- file.path(out_dir, "DIAG_bid_priceusd_fixed_tiers_counts_ALL_vs_OPEN_by_country.csv")
+## CHANGE (B4): filename still OK; now contains COMPETITIVE too
+price_tier_outfile <- file.path(out_dir, "DIAG_bid_priceusd_fixed_tiers_counts_ALL_vs_OPEN_vs_COMPETITIVE_by_country.csv")
 fwrite(price_tier_counts, price_tier_outfile)
 cat(sprintf("  Wrote: %s\n", price_tier_outfile))
 
 price_tertiles <- rbindlist(price_tertiles_all, fill = TRUE)
-price_tertiles_outfile <- file.path(out_dir, "DIAG_bid_priceusd_tertiles_counts_ALL_vs_OPEN_by_country.csv")
+## CHANGE (B5): filename updated to reflect COMPETITIVE
+price_tertiles_outfile <- file.path(out_dir, "DIAG_bid_priceusd_tertiles_counts_ALL_vs_OPEN_vs_COMPETITIVE_by_country.csv")
 fwrite(price_tertiles, price_tertiles_outfile)
 cat(sprintf("  Wrote: %s\n", price_tertiles_outfile))
 
-# Optional: export indicator availability debug tables (helps explain "Skipping missing indicators")
+# Indicator availability by country
 avail_dbg <- rbindlist(lapply(names(available_indicators_by_country), function(cc) {
   data.table(Country_code = cc, Indicator = available_indicators_by_country[[cc]], status = "available")
 }), fill = TRUE)
@@ -792,19 +775,13 @@ fwrite(ind_dbg, ind_dbg_outfile)
 cat(sprintf("  Wrote: %s\n", ind_dbg_outfile))
 
 # IV. Combine and export ####
-
-# Combine all countries
 cat("\nCombining all country tables...\n")
 proact_combined <- rbindlist(proact_export_all)
 cat(sprintf("Combined dataset: %d rows, %d columns\n", nrow(proact_combined), ncol(proact_combined)))
 
-# Add indicator labels from lookup table
 cat("Matching indicator names with labels...\n")
-
-# Create Indicator_original_name column (keep original technical names)
 proact_combined[, Indicator_original_name := Indicator]
 
-# Merge with lookup table to get the 50-character labels
 proact_combined <- merge(proact_combined,
                          ind_names_lookup[, .(Indicator_name_in_dataset, Indicator_NEW_short_50)],
                          by.x = "Indicator_original_name",
@@ -812,64 +789,48 @@ proact_combined <- merge(proact_combined,
                          all.x = TRUE,
                          sort = FALSE)
 
-# Check for unmatched indicators
 unmatched_ind <- proact_combined[is.na(Indicator_NEW_short_50), unique(Indicator_original_name)]
 if (length(unmatched_ind) > 0) {
   warning(sprintf("Indicators without label match: %s", paste(unmatched_ind, collapse = ", ")))
   cat(sprintf("  ? WARNING: %d indicators have no label match and will keep original names\n", length(unmatched_ind)))
 }
 
-# Replace Indicator column with the 50-character label
-# If no match found, keep the original name
 proact_combined[, Indicator := fifelse(is.na(Indicator_NEW_short_50),
-                                       Indicator_original_name,
-                                       Indicator_NEW_short_50)]
-
-# Remove the temporary merge column
+                                      Indicator_original_name,
+                                      Indicator_NEW_short_50)]
 proact_combined[, Indicator_NEW_short_50 := NULL]
 
-# Reorder so Indicator_original_name comes right after Indicator
 other_cols <- setdiff(names(proact_combined), c("Indicator", "Indicator_original_name"))
 setcolorder(proact_combined, c("Indicator", "Indicator_original_name", other_cols))
 
 cat(sprintf("Indicator labels applied: %d unique indicators\n",
             length(unique(proact_combined$Indicator))))
 
-# Function to add ISO3 codes
 add_iso3 <- function(dt, iso_matcher) {
-  if (!is.data.table(dt)) {
-    setDT(dt)
-  }
-  
-  # Merge with iso matcher
+  if (!is.data.table(dt)) setDT(dt)
+
   dt <- merge(dt, iso_matcher[, .(iso2, iso3)],
               by.x = "Country_code", by.y = "iso2",
               all.x = TRUE, sort = FALSE)
-  
-  # Custom mapping: EU -> EUE
+
   dt[Country_code == "EU", iso3 := "EUE"]
-  
-  # Check for unmatched countries
+
   unmatched <- dt[is.na(iso3), unique(Country_code)]
   if (length(unmatched) > 0) {
     warning(sprintf("ISO3 matching: No match found for Country_code(s): %s",
                     paste(unmatched, collapse = ", ")))
     vcat("WARNING: ISO3 matching failed for: %s", paste(unmatched, collapse = ", "))
   }
-  
-  # Rename columns
+
   setnames(dt, "Country_code", "Country_code_ISO_2")
   setnames(dt, "iso3", "Country_code_ISO_3")
-  
-  return(dt)
+  dt
 }
 
-# Add ISO3 codes
 cat("Adding ISO3 codes...\n")
 proact_combined <- add_iso3(proact_combined, iso_matcher)
 cat("ISO3 codes added successfully\n")
 
-# Reorder columns: Country, ISO2, ISO3, Indicator, Indicator_original_name, then the rest
 setcolorder(proact_combined, c(
   "Country", "Country_code_ISO_2", "Country_code_ISO_3",
   "Indicator", "Indicator_original_name",
@@ -877,10 +838,8 @@ setcolorder(proact_combined, c(
                                     "Indicator", "Indicator_original_name"))
 ))
 
-# Replace NaN with NA
 proact_combined[proact_combined == "NaN"] <- NA
 
-# Export combined table
 output_file <- file.path(out_dir, "ProACT_dashboard_export.csv")
 cat(sprintf("\nExporting to: %s\n", output_file))
 fwrite(proact_combined, output_file)
@@ -893,7 +852,6 @@ cat(sprintf("Year range: %d-%d\n",
             min(proact_combined$tender_year, na.rm=TRUE),
             max(proact_combined$tender_year, na.rm=TRUE)))
 
-# Report on data completeness
 rows_with_data <- sum(proact_combined$Indicator_availability_filter == 1)
 rows_with_na <- sum(proact_combined$Indicator_availability_filter == 0)
 cat(sprintf("\nData completeness:\n"))
@@ -904,10 +862,7 @@ cat(sprintf("  Rows with NA: %s (%.1f%%) - due to missing price data / filters\n
             format(rows_with_na, big.mark=","),
             rows_with_na/nrow(proact_combined)*100))
 
-# Report on dimension completeness
 cat(sprintf("\nDimension completeness:\n"))
-
-# Supply type distribution
 supplytype_dist <- table(proact_combined$tender_supplytype, useNA = "ifany")
 cat(sprintf("  Supply type distribution:\n"))
 for (i in seq_along(supplytype_dist)) {
@@ -919,15 +874,13 @@ for (i in seq_along(supplytype_dist)) {
               supplytype_dist[i]/nrow(proact_combined)*100))
 }
 
-# Report on unmatched markets
 na_market_count <- sum(is.na(proact_combined$product_market_short_name))
 if (na_market_count > 0) {
   cat(sprintf("\nUnmatched markets:\n"))
   cat(sprintf("  Rows with NA product_market: %s (%.1f%%)\n",
               format(na_market_count, big.mark=","),
               na_market_count/nrow(proact_combined)*100))
-  
-  # Show by country
+
   na_by_country <- proact_combined[is.na(product_market_short_name),
                                    .N,
                                    by = Country_code_ISO_2]
@@ -941,7 +894,6 @@ if (na_market_count > 0) {
   }
 }
 
-# Show countries with all NA values (completely missing price data / filtered out)
 countries_with_all_na <- proact_combined[, .(all_na = all(Indicator_availability_filter == 0)),
                                          by = Country_code_ISO_2][all_na == TRUE]
 if (nrow(countries_with_all_na) > 0) {
