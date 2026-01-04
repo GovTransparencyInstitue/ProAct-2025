@@ -16,6 +16,7 @@
 ## Supply types: WORKS, SERVICES, SUPPLIES (+ NA for missing)
 ##
 ## If price data (bid_priceusd) is missing for a country, all three tiers will have NA values
+## Added: missing rate for the tier 
 
 suppressPackageStartupMessages({
   library(optparse)
@@ -108,7 +109,7 @@ MISSINGNESS_THRESHOLD <- 0.30
 
 ## --------------------------------------------------
 ## CHANGE (A2): Eligibility masks for sample-restricted indicators
-## - Missingness is computed ONLY among eligible observations.
+## - Missingness is computed ONLY among eligible observations (within sample restriction)
 ## - This prevents penalizing NA created by sample restrictions upstream.
 ## --------------------------------------------------
 
@@ -124,7 +125,6 @@ get_proc_flags <- function(dt) {
   )
 }
 
-# NOTE: adjust these lists if your upstream "restriction-to-NA" logic differs.
 IND_COMPETITIVE_ONLY <- c(
   "ind_tr_bidder_id",
   "ind_tr_call_pub",
@@ -158,10 +158,8 @@ indicator_eligible_mask <- function(dt, indicator) {
 
 ## --------------------------------------------------
 ## CHANGE (A3): calculate_proact_aggregates now:
-## - keeps Dani-style tiers ALWAYS (no dropping)
 ## - computes missing_share ONLY within eligible sample
-## - outputs ONLY 2 new columns: missing_share, passes_missingness_30
-##   (removes Ivana's extra n_eligible/n_non_missing from final schema)
+## - outputs 2 new columns: missing_share, passes_missingness_30
 ## --------------------------------------------------
 calculate_proact_aggregates <- function(dt, indicator) {
   if (!is.data.table(dt)) dt <- as.data.table(dt)
@@ -196,7 +194,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
       mean_val = if (n_eligible == 0) NA_real_ else mean(vals[elig], na.rm = TRUE),
       numerator = if (n_eligible == 0) NA_integer_ else sum(vals[elig] == 1, na.rm = TRUE),
       denominator = n_non_missing,              # eligible+observed for indicator
-      n_obs = nrow(subset_dt),                  # tier sample size (Dani-style)
+      n_obs = nrow(subset_dt),                  # tier sample size 
       total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1e6,
       missing_share = miss_share,
       passes = passes
@@ -213,7 +211,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
       n_observations = rep(NA_integer_, 3),
       Total_contract_value_million_usd = rep(NA_real_, 3),
 
-      # CHANGE (A3): Dani-style + minimal additions
+      # CHANGE (A3): 
       missing_share = rep(NA_real_, 3),
       passes_missingness_30 = rep(0L, 3)
     ))
@@ -694,7 +692,6 @@ for (file_path in files_to_load) {
   ## Instead: redefine Indicator_availability_filter to require:
   ##  - indicator value exists AND
   ##  - passes_missingness_30 == 1
-  ## This preserves full output like Dani, but enables "hide" in dashboard.
   ## --------------------------------------------------
   proact_export[, Indicator_availability_filter := fifelse(
     !is.na(Indicator_value) & passes_missingness_30 == 1L,
