@@ -1,5 +1,5 @@
 ## ---- ProACT Indicator Pipeline ---- ##
-##  Last edited by Ivana, Jan 1
+##  Last edited by Ivana, Jan 27
 
 data_dir <- "/var/tmp/ivana"   
 
@@ -33,7 +33,7 @@ country_data <- function(country_code, data_dir) {
 # --------------------------------------------------
 # 1. Transparency indicators
 # --------------------------------------------------
-# Rules:
+# General info:
 # - Most indicators apply to ALL rows (all awarded contracts)
 # - Competitive-only indicators: bidder_id, bidder_loc, call_pub, bid_deadline, bid_opening
 # - Supplier_id is ALL rows (based on bidder_id)
@@ -237,6 +237,7 @@ calc_openness_indicators <- function(dt) {
   #  2) ind_op_nonopen_proc     (0/1) from ind_corr_nonopen_proc_method (0/50/100)
   #  3) ind_op_adv_period       (days/NA) mirrors submp (competitive only)
   #  4) ind_op_short_adv_flag   (0/1/NA) from ind_corr_subm_period (0/50/100, competitive only)
+  #  5) ind_op_lots_usage       (0/1/NA) share of tenders with >1 lot (competitive only)
   # ==================================================
 
   # -------------------------
@@ -246,7 +247,10 @@ calc_openness_indicators <- function(dt) {
     ind_op_open_proc        = NA_integer_,
     ind_op_nonopen_proc     = NA_integer_,
     ind_op_adv_period       = NA_integer_,  # continuous days (submp)
-    ind_op_short_adv_flag   = NA_integer_   # 0/1 from ind_corr_subm_period
+    ind_op_short_adv_flag   = NA_integer_,  # 0/1 from ind_corr_subm_period
+
+    # NEW:
+    ind_op_lots_usage       = NA_integer_   # tender-level, competitive only
   )]
 
   # -------------------------
@@ -284,7 +288,32 @@ calc_openness_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 3) Advertisement period (continuous days) mirrors submp, competitive only
+  # 3) Lots usage: tender-level indicator (competitive only)
+  # Share of tenders divided into multiple lots (>1)
+  # Needs: tender_id, lot_number
+  # -------------------------
+  if (all(c("tender_id", "lot_number") %in% names(dt)) &&
+      any(competitive == TRUE, na.rm = TRUE)) {
+
+    tmp <- dt[competitive == TRUE, .(
+      n_lots = data.table::uniqueN({
+        x <- trimws(as.character(lot_number))
+        x[x == ""] <- NA_character_
+        x
+      }, na.rm = TRUE)
+    ), by = tender_id]
+
+    tmp[, ind_op_lots_usage := fifelse(
+      n_lots == 0, NA_integer_,              # lot info missing
+      as.integer(n_lots > 1)                 # 1 if multiple lots else 0
+    )]
+
+    # assign tender-level value back to all rows of that tender (within competitive sample)
+    dt[competitive == TRUE, ind_op_lots_usage := tmp[.SD, on = .(tender_id), x.ind_op_lots_usage]]
+  }
+
+  # -------------------------
+  # 4) Advertisement period (continuous days) mirrors submp, competitive only
   # (  original logic; only the NAME changed)
   # -------------------------
   if ("submp" %in% names(dt)) {
@@ -292,7 +321,7 @@ calc_openness_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 4) Short advertisement period flag (0/1) from ind_corr_subm_period (0/50/100), competitive only
+  # 5) Short advertisement period flag (0/1) from ind_corr_subm_period (0/50/100), competitive only
   #   100 -> 0 (not a red flag)
   #   50 or 0 -> 1 (short / red flag of any level)
   # -------------------------
@@ -306,6 +335,7 @@ calc_openness_indicators <- function(dt) {
 
   return(dt)
 }
+
 
 # --------------------------------------------------
 # 3. Administrative efficiency indicators
@@ -356,15 +386,8 @@ calc_openness_indicators <- function(dt) {
 }
 
 # --------------------------------------------------
-# 4. Competition indicators  (NAME-ALIGNED VERSION)
+# 4. Competition indicators  
 # --------------------------------------------------
-# Keeps existing calculations, but ensures the OUTPUT column names
-# match exactly what   dashboard export script expects:
-#   ind_comp_avg_bids
-#   ind_comp_single_bid
-#   ind_comp_bidder_non_l
-#   ind_comp_foreign_suppliers
-#   ind_comp_tax_haven_suppliers
 
 calc_competition_indicators <- function(dt) {
   setDT(dt)
@@ -382,8 +405,11 @@ calc_competition_indicators <- function(dt) {
   init_if_missing("ind_comp_foreign_suppliers",   as.integer(NA))
   init_if_missing("ind_comp_tax_haven_suppliers", as.integer(NA))
 
+  # NEW:
+  init_if_missing("ind_comp_good_comp",     as.integer(NA))
+
   # -------------------------
-  # Eligibility mask: OPEN only (avg bids + single bid)
+  # Eligibility mask: OPEN only (avg bids + single bid + good competition)
   # -------------------------
   eligible_open <- rep(FALSE, nrow(dt))
   if ("tender_proceduretype" %in% names(dt)) {
@@ -411,7 +437,22 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 2) Single bidding (OPEN only)
+  # 2) Good competition level (OPEN only): 6+ bids
+  #   1 -> >= 6 bids
+  #   0 -> 1-5 bids
+  #  NA -> bid count missing
+  # -------------------------
+  if (!is.na(bids_col)) {
+    dt[eligible_open == TRUE, ind_comp_good_comp := {
+      x <- suppressWarnings(as.integer(get(bids_col)))
+      reliable <- !is.na(x) & x > 0L
+      x_cap <- pmin(x, 50L)  # simple winsorisation/cap
+      fifelse(!reliable, NA_integer_, as.integer(x_cap >= 6L))
+    }]
+  }
+
+  # -------------------------
+  # 3) Single bidding (OPEN only)
   #   0 -> 1 (single bid), 100 -> 0 (>1 bid)
   # -------------------------
   if ("ind_corr_singleb" %in% names(dt)) {
@@ -424,7 +465,7 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 3) Foreign suppliers (ALL rows)
+  # 4) Foreign suppliers (ALL rows)
   # -------------------------
   if (all(c("bidder_country", "tender_country") %in% names(dt))) {
     dt[, bidder_country_clean := toupper(trimws(as.character(bidder_country)))]
@@ -444,7 +485,7 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 4) Non-local supplier (ALL rows)
+  # 5) Non-local supplier (ALL rows)
   #   100 -> 1, 0 -> 0
   # -------------------------
   if ("ind_comp_bidder_non_local" %in% names(dt)) {
@@ -457,7 +498,7 @@ calc_competition_indicators <- function(dt) {
   }
 
   # -------------------------
-  # 5) Tax haven supplier (ALL rows)
+  # 6) Tax haven supplier (ALL rows)
   #   0 -> 1 (tax haven), 100 -> 0
   # -------------------------
   if ("ind_corr_taxhaven" %in% names(dt)) {
@@ -505,11 +546,13 @@ TR_INDICATOR_VARS <- c(
 
 IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index", "ind_tr_benford")
 
+# UPDATED: added ind_op_lots_usage
 IND_OP_VARS <- c(
   "ind_op_open_proc",
   "ind_op_nonopen_proc",
   "ind_op_adv_period",
-  "ind_op_short_adv_flag"
+  "ind_op_short_adv_flag",
+  "ind_op_lots_usage"
 )
 
 IND_ADM_VARS <- c(
@@ -517,9 +560,11 @@ IND_ADM_VARS <- c(
   "ind_adm_long_dec_flag"
 )
 
+# UPDATED: added ind_comp_good_comp (6+ bids)
 IND_COMP_VARS <- c(
   "ind_comp_avg_bids",
   "ind_comp_single_bid",
+  "ind_comp_good_comp",
   "ind_comp_bidder_non_l",
   "ind_comp_foreign_suppliers",
   "ind_comp_tax_haven_suppliers"
@@ -562,6 +607,7 @@ run_country <- function(cc, data_dir) {
     tables_comp = tabulate_vars(IND_COMP_VARS, dt)
   )
 }
+
 
 # --------------------------------------------------
 # Countries
