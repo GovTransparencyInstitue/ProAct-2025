@@ -45,7 +45,7 @@ setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace sp
 
 # ---------- CLI ----------
 opt_list <- list(
-  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 3"),
+  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 5"),
   make_option(c("--output-dir"), type="character", default="/var/tmp/ivana/export_dashboard ready"),
   make_option(c("--output-subdir"), type="character", default=format(Sys.Date(), "%m%d")),
   make_option(c("--verbose"), action="store_true", default=FALSE)
@@ -233,45 +233,45 @@ calculate_proact_aggregates <- function(dt, indicator) {
 
   has_price_data <- "bid_priceusd" %in% names(dt) && sum(!is.na(dt$bid_priceusd)) > 0
 
-  calc_stats <- function(subset_dt) {
-    if (nrow(subset_dt) == 0) {
-      return(list(
-        mean_val = NA_real_,
-        numerator = NA_integer_,
-        denominator = NA_integer_,
-        n_obs = 0L,
-        n_eligible = 0L,
-        total_value = NA_real_,
-        missing_share = NA_real_,
-        passes = NA_integer_
-      ))
-    }
-
-    # eligibility within this tier subset
-    elig <- indicator_eligible_mask(subset_dt, indicator)
-    n_eligible <- sum(elig, na.rm = TRUE)
-
-    # eligible + observed (non-missing)
-    n_non_missing <- if (n_eligible == 0) 0L else sum(!is.na(subset_dt[[indicator]]) & elig)
-
-    miss_share <- if (n_eligible == 0) NA_real_ else (n_eligible - n_non_missing) / n_eligible
-
-    # If no eligible sample, don't mark as failed; keep NA
-    passes <- if (n_eligible == 0) NA_integer_ else as.integer(!is.na(miss_share) && miss_share <= MISSINGNESS_THRESHOLD)
-
-    vals <- subset_dt[[indicator]]
-
-    list(
-      mean_val = if (n_eligible == 0) NA_real_ else round(mean(vals[elig], na.rm = TRUE), 2),
-      numerator = if (indicator %in% IND_BINARY_RISK && n_eligible > 0) sum(vals[elig] == 1, na.rm = TRUE) else NA_integer_,
-      denominator = n_non_missing,                # eligible + observed
-      n_obs = nrow(subset_dt),                    # ALL in tier
-      n_eligible = n_eligible,                    # eligible within tier
-      total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1e6,
-      missing_share = miss_share,
-      passes = passes
-    )
+calc_stats <- function(subset_dt) {
+  if (nrow(subset_dt) == 0) {
+    return(list(
+      mean_val = NA_real_,
+      numerator = NA_integer_,
+      denominator = NA_integer_,
+      n_obs = 0L,
+      n_eligible = 0L,
+      total_value = NA_real_,
+      missing_share = NA_real_,
+      passes = NA_integer_
+    ))
   }
+
+  # eligibility within this tier subset
+  elig <- indicator_eligible_mask(subset_dt, indicator)
+  n_eligible <- sum(elig, na.rm = TRUE)
+
+  # eligible + observed (non-missing)
+  n_non_missing <- if (n_eligible == 0) 0L else sum(!is.na(subset_dt[[indicator]]) & elig)
+
+  miss_share <- if (n_eligible == 0) NA_real_ else (n_eligible - n_non_missing) / n_eligible
+
+  # If no eligible sample, don't mark as failed; keep NA
+  passes <- if (n_eligible == 0) NA_integer_ else as.integer(!is.na(miss_share) && miss_share <= MISSINGNESS_THRESHOLD)
+
+  vals <- subset_dt[[indicator]]
+
+  list(
+    mean_val = if (n_eligible == 0) NA_real_ else round(mean(vals[elig], na.rm = TRUE), 2),
+    numerator = if (n_eligible == 0) NA_integer_ else sum(vals[elig] == 1, na.rm = TRUE),
+    denominator = n_non_missing,                # eligible + observed
+    n_obs = nrow(subset_dt),                    # ALL in tier
+    n_eligible = n_eligible,                    # eligible within tier
+    total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1e6,
+    missing_share = miss_share,
+    passes = passes
+  )
+}
 
   # If no price data => all tiers NA
   if (!has_price_data) {
@@ -288,6 +288,8 @@ calculate_proact_aggregates <- function(dt, indicator) {
       passes_missingness_30 = rep(NA_integer_, 3)
     ))
   }
+
+
 
   setorder(dt, -bid_priceusd)
 
