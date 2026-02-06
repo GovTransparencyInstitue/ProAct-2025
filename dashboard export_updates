@@ -8,10 +8,6 @@
 ## Year filter: 2000-2020
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
-## Old price tiers:
-##   HIGH: >= $5,000,000
-##   MED:  $500,000 - $4,999,999
-##   LOW:  < $500,000
 ## NEW price tiers:
 ##   HIGH: >= $400,000
 ##   MED:  $50,000 - $399,999
@@ -195,7 +191,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
     vals <- subset_dt[[indicator]]
 
     list(
-      mean_val = if (n_eligible == 0) NA_real_ else mean(vals[elig], na.rm = TRUE),
+      mean_val = if (n_eligible == 0) NA_real_ else round(mean(vals[elig], na.rm = TRUE), 2),
       numerator = if (n_eligible == 0) NA_integer_ else sum(vals[elig] == 1, na.rm = TRUE),
       denominator = n_non_missing,              # eligible+observed for indicator
       n_obs = nrow(subset_dt),                  # tier sample size 
@@ -475,15 +471,19 @@ for (file_path in files_to_load) {
                   (price_available/nrow(df)*100),
                   format(round(median(df$bid_priceusd, na.rm=TRUE)), big.mark=",")))
 
-      high_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 5000000)
-      med_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 500000 & df$bid_priceusd < 5000000)
-      low_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd < 500000)
+high_count <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 400000)
+med_count  <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd >= 50000 & df$bid_priceusd < 400000)
+low_count  <- sum(!is.na(df$bid_priceusd) & df$bid_priceusd < 50000)
 
-      cat(sprintf("    HIGH (=$5M): %s (%.1f%%), MED ($500K-$5M): %s (%.1f%%), LOW (<$500K): %s (%.1f%%)\n",
-                  format(high_count, big.mark=","), high_count/price_available*100,
-                  format(med_count, big.mark=","), med_count/price_available*100,
-                  format(low_count, big.mark=","), low_count/price_available*100))
-    }
+
+
+     cat(sprintf(
+  "    HIGH (>= $400K): %s (%.1f%%), MED ($50K–$399K): %s (%.1f%%), LOW (< $50K): %s (%.1f%%)\n",
+  format(high_count, big.mark=","), high_count / price_available * 100,
+  format(med_count,  big.mark=","), med_count  / price_available * 100,
+  format(low_count,  big.mark=","), low_count  / price_available * 100
+))
+}
   }
 
   # Add Country and Country_code
@@ -541,11 +541,11 @@ for (file_path in files_to_load) {
 
   # Contract value tier label
   if ("bid_priceusd" %in% names(df) && sum(!is.na(df$bid_priceusd)) > 0) {
-    df[, contract_value_tier := fifelse(
-      is.na(bid_priceusd), NA_character_,
-      fifelse(bid_priceusd >= 5000000, "HIGH",
-              fifelse(bid_priceusd >= 500000, "MED", "LOW"))
-    )]
+df[, contract_value_tier := fifelse(
+  is.na(bid_priceusd), NA_character_,
+  fifelse(bid_priceusd >= 400000, "HIGH",
+          fifelse(bid_priceusd >= 50000, "MED", "LOW"))
+)]
   } else {
     df[, contract_value_tier := NA_character_]
   }
@@ -600,13 +600,14 @@ for (file_path in files_to_load) {
     df_price_comp[, scope := "COMPETITIVE"]
 
     count_tiers <- function(dtx) {
-      data.table(
-        n_price = nrow(dtx),
-        n_high = sum(dtx$bid_priceusd >= 5000000),
-        n_med  = sum(dtx$bid_priceusd >= 500000 & dtx$bid_priceusd < 5000000),
-        n_low  = sum(dtx$bid_priceusd < 500000)
-      )
-    }
+  data.table(
+    n_price = nrow(dtx),
+    n_high = sum(dtx$bid_priceusd >= 400000),
+    n_med  = sum(dtx$bid_priceusd >= 50000 & dtx$bid_priceusd < 400000),
+    n_low  = sum(dtx$bid_priceusd < 50000)
+  )
+}
+
 
     tiers_all  <- count_tiers(df_price)
     tiers_open <- if (nrow(df_price_open) > 0) count_tiers(df_price_open) else data.table(n_price=0, n_high=0, n_med=0, n_low=0)
