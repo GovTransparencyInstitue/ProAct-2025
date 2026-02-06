@@ -2,16 +2,20 @@
 
 ## ---- ProACT ---- ##
 ## First time edited: 12/11/2025, by Dani
-## Last time edited: 12/30/2025, by Ivana
+## Last time edited: 02/06/2026, by Ivana
 ##
 ## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type
 ## Year filter: 2000-2020
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
-## Price tiers:
+## Old price tiers:
 ##   HIGH: >= $5,000,000
 ##   MED:  $500,000 - $4,999,999
 ##   LOW:  < $500,000
+## NEW price tiers:
+##   HIGH: >= $400,000
+##   MED:  $50,000 - $399,999
+##   LOW:  < $50,000
 ##
 ## Supply types: WORKS, SERVICES, SUPPLIES (+ NA for missing)
 ##
@@ -219,9 +223,9 @@ calculate_proact_aggregates <- function(dt, indicator) {
 
   setorder(dt, -bid_priceusd)
 
-  high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 5000000])
-  med_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 500000 & bid_priceusd < 5000000])
-  low_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 500000])
+  high_stats <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 400000])
+  med_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd >= 50000 & bid_priceusd < 400000])
+  low_stats  <- calc_stats(dt[!is.na(bid_priceusd) & bid_priceusd < 50000])
 
   data.table(
     Indicator = indicator,
