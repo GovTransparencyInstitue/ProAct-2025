@@ -66,6 +66,7 @@ vcat("Output: %s", out_dir)
 
 # ---------- Indicators lists ----------
 list_of_indicators_new <- c(
+  # Transparency
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
   "ind_tr_supplier_id",
@@ -82,23 +83,23 @@ list_of_indicators_new <- c(
   "ind_tr_contract_value",
   "ind_tr_benford",
   "ind_tr_index",
-  "ind_op_open_proc",
-  "ind_op_nonopen_proc",
+
+  # Openness
   "ind_op_adv_period",
   "ind_op_short_adv_flag",
+  "ind_op_lots_usage",
+
+  # Administrative efficiency
   "ind_adm_dec_period",
   "ind_adm_long_dec_flag",
+
+  # Competition
   "ind_comp_avg_bids",
   "ind_comp_single_bid",
-  "ind_comp_new_suppliers",
-  "ind_comp_sector_concentration",
   "ind_comp_bidder_non_l",
   "ind_comp_foreign_suppliers",
   "ind_comp_tax_haven_suppliers",
-  "ind_econ_sector_composition",
-  "ind_econ_buyer_concentration",
-  "ind_impl_cost_overrun",
-  "ind_impl_time_overrun"
+  "ind_comp_good_comp"
 )
 list_of_indicators <- list_of_indicators_new
 
