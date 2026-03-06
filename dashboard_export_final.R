@@ -2,7 +2,7 @@
 ## First time edited: 12/11/2025, by Dani
 ## Last time edited: 02/06/2026, by Ivana
 ##
-## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type
+## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type + Proc_Type
 ## Year filter: 2000-2020
 ## Handles missing price data gracefully by setting values to NA for affected tiers
 ##
@@ -56,7 +56,7 @@ setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace sp
 
 # ---------- CLI ----------
 opt_list <- list(
-  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 5"),
+  make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 6"),
   make_option(c("--output-dir"), type="character", default="/var/tmp/ivana/export_dashboard ready"),
   make_option(c("--output-subdir"), type="character", default=format(Sys.Date(), "%m%d")),
   make_option(c("--verbose"), action="store_true", default=FALSE)
@@ -187,7 +187,7 @@ IND_BINARY_RISK <- c(
 ## --------------------------------------------------
 ## Eligibility mask
 ## - Prefer filter_open / filter_competitive if they exist
-## - Fallback to tender_proceduretype if filters are missing
+## - [CHANGED] Fallback now uses proc_type_filter instead of tender_proceduretype
 ## - Warn ONCE (not per indicator call)
 ## - IMPORTANT: ensure mask has NO NA (NA -> FALSE)
 ## --------------------------------------------------
@@ -198,23 +198,24 @@ indicator_eligible_mask <- function(dt, indicator) {
   
   has_filters <- ("filter_open" %in% names(dt)) && ("filter_competitive" %in% names(dt))
   
+  # [CHANGED] Fallback uses proc_type_filter instead of tender_proceduretype
   proc_fallback <- function(which = c("open", "competitive")) {
     which <- match.arg(which)
-    if (!("tender_proceduretype" %in% names(dt))) {
+    if (!("proc_type_filter" %in% names(dt))) {
       return(rep(FALSE, nrow(dt)))
     }
-    proc_clean <- toupper(trimws(as.character(dt$tender_proceduretype)))
     if (which == "open") {
-      out <- !is.na(proc_clean) & proc_clean == "OPEN"
+      out <- !is.na(dt$proc_type_filter) & dt$proc_type_filter == "OPEN"
     } else {
-      out <- !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
+      out <- !is.na(dt$proc_type_filter) & dt$proc_type_filter %in% c("OPEN", "RESTRICTED")
     }
     out[is.na(out)] <- FALSE
     out
   }
   
+  # [CHANGED] Warning message updated to reference proc_type_filter
   if (!has_filters && is.null(.ind_filter_warned$printed)) {
-    warning("filter_open/filter_competitive not found in df. Falling back to tender_proceduretype for eligibility (warn once).")
+    warning("filter_open/filter_competitive not found in df. Falling back to proc_type_filter for eligibility (warn once).")
     .ind_filter_warned$printed <- TRUE
   }
   
@@ -265,7 +266,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
         n_obs = 0L,
         n_eligible = 0L,
         total_value = NA_real_,
-        total_value_risky = NA_real_,  # NEW
+        total_value_risky = NA_real_,
         missing_share = NA_real_,
         passes = NA_integer_
       ))
@@ -292,11 +293,10 @@ calculate_proact_aggregates <- function(dt, indicator) {
       NA_integer_
     }
     
-    # NEW: Total value of risky contracts (where indicator = 1)
+    # Total value of risky contracts (where indicator = 1)
     total_value_risky_val <- if (n_eligible == 0) {
       NA_real_
     } else if (indicator %in% IND_BINARY_RISK) {
-      # Sum bid_priceusd where eligible AND indicator = 1
       risky_mask <- elig & (vals == 1)
       sum(subset_dt$bid_priceusd[risky_mask], na.rm = TRUE) / 1e6
     } else {
@@ -310,7 +310,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
       n_obs = nrow(subset_dt),
       n_eligible = n_eligible,
       total_value = sum(subset_dt$bid_priceusd, na.rm = TRUE) / 1e6,
-      total_value_risky = total_value_risky_val,  # NEW
+      total_value_risky = total_value_risky_val,
       missing_share = miss_share,
       passes = passes
     )
@@ -326,7 +326,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
       n_observations = rep(NA_integer_, 3),
       n_eligible = rep(NA_integer_, 3),
       Total_contract_value_million_usd = rep(NA_real_, 3),
-      Total_risky_contract_value_million_usd = rep(NA_real_, 3),  # NEW
+      Total_risky_contract_value_million_usd = rep(NA_real_, 3),
       missing_share = rep(NA_real_, 3),
       passes_missingness_30 = rep(NA_integer_, 3)
     ))
@@ -351,7 +351,7 @@ calculate_proact_aggregates <- function(dt, indicator) {
     n_observations = c(high_stats$n_obs, med_stats$n_obs, low_stats$n_obs),
     n_eligible = c(high_stats$n_eligible, med_stats$n_eligible, low_stats$n_eligible),
     Total_contract_value_million_usd = round(c(high_stats$total_value, med_stats$total_value, low_stats$total_value), 2),
-    Total_risky_contract_value_million_usd = round(c(high_stats$total_value_risky, med_stats$total_value_risky, low_stats$total_value_risky), 2),  # NEW
+    Total_risky_contract_value_million_usd = round(c(high_stats$total_value_risky, med_stats$total_value_risky, low_stats$total_value_risky), 2),
     missing_share = c(high_stats$missing_share, med_stats$missing_share, low_stats$missing_share),
     passes_missingness_30 = c(high_stats$passes, med_stats$passes, low_stats$passes)
   )
@@ -580,6 +580,30 @@ for (file_path in files_to_load) {
     }
   }
   
+  # [CHANGED] Handle proc_type_filter — ensure it is present and log distribution
+  if (!"proc_type_filter" %in% names(df)) {
+    warning(sprintf("'proc_type_filter' not found in %s. Creating NA column.", country_code))
+    df[, proc_type_filter := NA_character_]
+  } else {
+    proc_na <- sum(is.na(df$proc_type_filter))
+    proc_available <- nrow(df) - proc_na
+    cat(sprintf("  proc_type_filter: %s non-NA (%.1f%%)\n",
+                format(proc_available, big.mark=","),
+                proc_available / nrow(df) * 100))
+    proc_dist <- table(df$proc_type_filter, useNA = "ifany")
+    cat("    Distribution: ")
+    for (i in seq_along(proc_dist)) {
+      type_name <- names(proc_dist)[i]
+      if (is.na(type_name)) type_name <- "NA"
+      cat(sprintf("%s: %s (%.1f%%)",
+                  type_name,
+                  format(proc_dist[i], big.mark=","),
+                  proc_dist[i] / nrow(df) * 100))
+      if (i < length(proc_dist)) cat(", ")
+    }
+    cat("\n")
+  }
+  
   # Handle bid_priceusd
   if (!"bid_priceusd" %in% names(df)) {
     warning(sprintf("'bid_priceusd' not found in %s.", country_code))
@@ -604,7 +628,7 @@ for (file_path in files_to_load) {
       low_count  <- sum(df$bid_priceusd < 50000, na.rm = TRUE)
       
       cat(sprintf(
-        "    HIGH (=$400K): %s (%.1f%%), MED ($50K–$399K): %s (%.1f%%), LOW (<$50K): %s (%.1f%%)\n",
+        "    HIGH (=$400K): %s (%.1f%%), MED ($50K-$399K): %s (%.1f%%), LOW (<$50K): %s (%.1f%%)\n",
         format(high_count, big.mark=","), high_count / price_available * 100,
         format(med_count,  big.mark=","), med_count  / price_available * 100,
         format(low_count,  big.mark=","), low_count  / price_available * 100
@@ -633,24 +657,23 @@ for (file_path in files_to_load) {
                 paste(head(missing_indicators, 3), collapse=", ")))
   }
   
-  # DIAGNOSTICS (keeping original logic)
+  # DIAGNOSTICS
+  # [CHANGED] open_mask / competitive_mask fallback now uses proc_type_filter
   open_mask <- rep(FALSE, nrow(df))
   competitive_mask <- rep(FALSE, nrow(df))
   
   if ("filter_open" %in% names(df)) {
     open_mask <- df$filter_open == 1L
     open_mask[is.na(open_mask)] <- FALSE
-  } else if ("tender_proceduretype" %in% names(df)) {
-    proc_clean <- toupper(trimws(as.character(df$tender_proceduretype)))
-    open_mask <- !is.na(proc_clean) & proc_clean == "OPEN"
+  } else if ("proc_type_filter" %in% names(df)) {
+    open_mask <- !is.na(df$proc_type_filter) & df$proc_type_filter == "OPEN"
   }
   
   if ("filter_competitive" %in% names(df)) {
     competitive_mask <- df$filter_competitive == 1L
     competitive_mask[is.na(competitive_mask)] <- FALSE
-  } else if ("tender_proceduretype" %in% names(df)) {
-    proc_clean <- toupper(trimws(as.character(df$tender_proceduretype)))
-    competitive_mask <- !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")
+  } else if ("proc_type_filter" %in% names(df)) {
+    competitive_mask <- !is.na(df$proc_type_filter) & df$proc_type_filter %in% c("OPEN", "RESTRICTED")
   }
   
   if ("bid_priceusd" %in% names(df) && sum(!is.na(df$bid_priceusd)) > 0) {
@@ -693,7 +716,7 @@ for (file_path in files_to_load) {
     )
   }
   
-  # Price tier diagnostics (unchanged logic, optimized with fcase)
+  # Price tier diagnostics (unchanged logic)
   if (sum(!is.na(df$bid_priceusd)) > 0) {
     count_tiers <- function(dtx) {
       data.table(
@@ -722,7 +745,7 @@ for (file_path in files_to_load) {
       cbind(data.table(Country=country_name, Country_code=country_code, scope="COMPETITIVE"), tiers_comp)
     )
     
-    # Tertiles (unchanged)
+    # Tertiles
     df_price <- df[!is.na(bid_priceusd)]
     if (nrow(df_price) > 0) {
       q_all <- as.numeric(quantile(df_price$bid_priceusd, probs = c(1/3, 2/3), na.rm = TRUE, type = 7))
@@ -781,12 +804,12 @@ for (file_path in files_to_load) {
     )
   }
   
-  # Calculate ProACT aggregates
+  # [CHANGED] Calculate ProACT aggregates — proc_type_filter added to by() grouping
   proact_export <- df[, {
     rbindlist(lapply(available_indicators, function(ind) {
       calculate_proact_aggregates(.SD, ind)
     }), fill = TRUE)
-  }, by = .(Country, Country_code, tender_year, product_market_short_name, tender_supplytype)]
+  }, by = .(Country, Country_code, tender_year, product_market_short_name, tender_supplytype, proc_type_filter)]
   
   proact_export[, Indicator_availability_filter := fifelse(
     !is.na(Indicator_value) & passes_missingness_30 == 1L, 1L, 0L
@@ -877,13 +900,44 @@ if (length(unmatched_iso) > 0) {
 
 setnames(proact_combined, c("Country_code", "iso3"), c("Country_code_ISO_2", "Country_code_ISO_3"))
 
-# Reorder columns
+# [CHANGED] Add indicator procedure scope — used by dashboard to control
+# whether the proc_type_filter filter is shown / restricted per indicator:
+#   "OPEN"        -> proc_type_filter filter should be disabled (indicator only valid for OPEN)
+#   "COMPETITIVE" -> filter limited to OPEN / RESTRICTED only
+#   "ALL"         -> all procedure types shown
+proact_combined[, indicator_proc_scope := fcase(
+  Indicator_original_name %in% IND_OPEN_ONLY,        "OPEN",
+  Indicator_original_name %in% IND_COMPETITIVE_ONLY, "COMPETITIVE",
+  default = "ALL"
+)]
+
+# [CHANGED] Reorder columns — proc_type_filter and indicator_proc_scope added
 setcolorder(proact_combined, c(
   "Country", "Country_code_ISO_2", "Country_code_ISO_3",
-  "Indicator", "Indicator_original_name",
-  setdiff(names(proact_combined), c("Country", "Country_code_ISO_2", "Country_code_ISO_3",
-                                    "Indicator", "Indicator_original_name"))
+  "Indicator", "Indicator_original_name", "indicator_proc_scope",
+  "tender_year", "product_market_short_name", "tender_supplytype", "proc_type_filter",
+  setdiff(names(proact_combined), c(
+    "Country", "Country_code_ISO_2", "Country_code_ISO_3",
+    "Indicator", "Indicator_original_name", "indicator_proc_scope",
+    "tender_year", "product_market_short_name", "tender_supplytype", "proc_type_filter"
+  ))
 ))
+
+# [CHANGED] Add share columns for binary indicators
+# share_number_of_contracts: % of eligible contracts that are flagged (numerator / All_contracts)
+# share_contract_value:      % of total contract value that is flagged (risky value / total value)
+# Both are NA for continuous indicators (where Total_number_of_contracts is already NA)
+proact_combined[, share_number_of_contracts := fifelse(
+  is.na(Total_number_of_contracts) | is.na(All_contracts) | All_contracts == 0L,
+  NA_real_,
+  round(Total_number_of_contracts / All_contracts, 4)
+)]
+
+proact_combined[, share_contract_value := fifelse(
+  is.na(Total_risky_contract_value_million_usd) | is.na(Total_contract_value_million_usd) | Total_contract_value_million_usd == 0,
+  NA_real_,
+  round(Total_risky_contract_value_million_usd / Total_contract_value_million_usd, 4)
+)]
 
 # Clean NaN values
 num_cols <- names(proact_combined)[sapply(proact_combined, is.numeric)]
@@ -911,4 +965,4 @@ cat(sprintf("Year range: %d-%d\n",
 rows_with_data <- sum(proact_combined$Indicator_availability_filter == 1, na.rm = TRUE)
 cat(sprintf("\nRows with data: %s (%.1f%%)\n",
             format(rows_with_data, big.mark=","),
-            rows_with_data/nrow(proact_combined)*100
+            rows_with_data/nrow(proact_combined)*100))
