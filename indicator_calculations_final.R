@@ -5,8 +5,8 @@
 # -------------------------------------------------- 
 # Configuration
 # -------------------------------------------------- 
-data_dir <- Sys.getenv("PROACT_DATA_DIR", "/var/tmp/ivana")
-export_dir <- Sys.getenv("PROACT_EXPORT_DIR", "/var/tmp/ivana/Export 5")
+data_dir <- Sys.getenv("PROACT_DATA_DIR", "/var/tmp/ivana") #change with location of input data 
+export_dir <- Sys.getenv("PROACT_EXPORT_DIR", "/var/tmp/ivana/Export 6") #change with location to save export with calculated indicators
 
 # Risk scores
 RISK_NONE <- 100L
@@ -122,6 +122,39 @@ country_data <- function(country_code, data_dir) {
   return(dt)
 }
 
+# --------------------------------------------------
+# [CHANGED] Procedure Type Filter
+# NEW function: maps ind_corr_nonopen_proc_method -> proc_type_filter
+# --------------------------------------------------
+
+#' Create proc_type_filter from ind_corr_nonopen_proc_method
+#'
+#' @param dt data.table of procurement records
+#' @return data.table with added proc_type_filter column
+#' @details
+#' Maps ind_corr_nonopen_proc_method risk scores to procedure type labels:
+#'   100 -> "OPEN"
+#'   50  -> "RESTRICTED"
+#'   0   -> "DIRECT"
+#'   NA / other -> NA_character_
+
+create_proc_type_filter <- function(dt) {
+  setDT(dt)
+  
+  dt[, proc_type_filter := NA_character_]
+  
+  if ("ind_corr_nonopen_proc_method" %in% names(dt)) {
+    dt[, proc_type_filter := fcase(
+      as.integer(ind_corr_nonopen_proc_method) == RISK_NONE,   "OPEN",
+      as.integer(ind_corr_nonopen_proc_method) == RISK_MEDIUM, "RESTRICTED",
+      as.integer(ind_corr_nonopen_proc_method) == RISK_HIGH,   "DIRECT",
+      default = NA_character_
+    )]
+  }
+  
+  return(dt)
+}
+
 # -------------------------------------------------- 
 # Sample Restriction Filters
 # -------------------------------------------------- 
@@ -135,6 +168,7 @@ country_data <- function(country_code, data_dir) {
 #' - filter_open: 1 if procedure is OPEN, 0 otherwise
 #' - filter_competitive: 1 if procedure is OPEN or RESTRICTED, 0 otherwise
 #' These filters show which observations are eligible for sample-restricted indicators
+# [CHANGED] Now based on proc_type_filter instead of tender_proceduretype
 
 create_sample_filters <- function(dt) {
   setDT(dt)
@@ -145,19 +179,10 @@ create_sample_filters <- function(dt) {
     filter_competitive = 0L
   )]
   
-  # Set filters based on procedure type
-  if ("tender_proceduretype" %in% names(dt)) {
-    dt[, proc_clean_temp := toupper(trimws(as.character(tender_proceduretype)))]
-    
-    # OPEN filter: 1 if procedure is OPEN
-    dt[!is.na(proc_clean_temp) & proc_clean_temp == "OPEN", filter_open := 1L]
-    
-    # COMPETITIVE filter: 1 if procedure is OPEN or RESTRICTED
-    dt[!is.na(proc_clean_temp) & proc_clean_temp %in% c("OPEN", "RESTRICTED"), 
-       filter_competitive := 1L]
-    
-    # Clean up temporary column
-    dt[, proc_clean_temp := NULL]
+  # [CHANGED] Use proc_type_filter instead of tender_proceduretype
+  if ("proc_type_filter" %in% names(dt)) {
+    dt[proc_type_filter == "OPEN",                        filter_open        := 1L]
+    dt[proc_type_filter %in% c("OPEN", "RESTRICTED"),     filter_competitive := 1L]
   }
   
   return(dt)
@@ -207,6 +232,8 @@ calc_transparency_indicators <- function(dt) {
   # ------------------------- 
   # 1) ALL rows indicators
   # ------------------------- 
+  # NOTE: ind_tr_proc_type stays on tender_proceduretype — it is a data completeness
+  # check (was procedure type reported?), not a sample restriction
   if ("tender_proceduretype" %in% names(dt)) {
     dt[, ind_tr_proc_type := present01(tender_proceduretype)]
   }
@@ -259,9 +286,9 @@ calc_transparency_indicators <- function(dt) {
   # ------------------------- 
   # 2) COMPETITIVE ONLY (OPEN/RESTRICTED)
   # ------------------------- 
-  if ("tender_proceduretype" %in% names(dt)) {
-    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
-    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
+  # [CHANGED] competitive mask now uses proc_type_filter instead of tender_proceduretype
+  if ("proc_type_filter" %in% names(dt)) {
+    dt[, competitive := !is.na(proc_type_filter) & proc_type_filter %in% c("OPEN", "RESTRICTED")]
     
     # Bidder ID (competitive only)
     if ("bidder_id" %in% names(dt)) {
@@ -300,7 +327,7 @@ calc_transparency_indicators <- function(dt) {
     }
     
     # Clean up temporary columns
-    dt[, c("proc_clean", "competitive") := NULL]
+    dt[, competitive := NULL]
   }
   
   # ------------------------- 
@@ -355,12 +382,11 @@ calc_openness_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Competitive mask (OPEN or RESTRICTED procedures)
+  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, competitive := FALSE]
-  if ("tender_proceduretype" %in% names(dt)) {
-    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
-    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
-    dt[, proc_clean := NULL]
+  if ("proc_type_filter" %in% names(dt)) {
+    dt[, competitive := !is.na(proc_type_filter) & proc_type_filter %in% c("OPEN", "RESTRICTED")]
   }
   
   # ------------------------- 
@@ -437,12 +463,11 @@ calc_admin_efficiency_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Competitive mask (OPEN or RESTRICTED)
+  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, competitive := FALSE]
-  if ("tender_proceduretype" %in% names(dt)) {
-    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
-    dt[, competitive := !is.na(proc_clean) & proc_clean %in% c("OPEN", "RESTRICTED")]
-    dt[, proc_clean := NULL]
+  if ("proc_type_filter" %in% names(dt)) {
+    dt[, competitive := !is.na(proc_type_filter) & proc_type_filter %in% c("OPEN", "RESTRICTED")]
   }
   
   # ------------------------- 
@@ -506,12 +531,11 @@ calc_competition_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Eligibility mask: OPEN only (for bid-related indicators)
+  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, eligible_open := FALSE]
-  if ("tender_proceduretype" %in% names(dt)) {
-    dt[, proc_clean := toupper(trimws(as.character(tender_proceduretype)))]
-    dt[, eligible_open := !is.na(proc_clean) & proc_clean == "OPEN"]
-    dt[, proc_clean := NULL]
+  if ("proc_type_filter" %in% names(dt)) {
+    dt[, eligible_open := !is.na(proc_type_filter) & proc_type_filter == "OPEN"]
   }
   
   # ------------------------- 
@@ -643,9 +667,16 @@ run_country <- function(cc, data_dir) {
     dt <- dt[tolower(trimws(as.character(bid_iswinning))) %in% c("true", "t", "1", "yes", "y")]
   }
   
+  # -------------------------
+  # [CHANGED] CREATE PROC TYPE FILTER FIRST
+  # New step: derive proc_type_filter from ind_corr_nonopen_proc_method
+  # -------------------------
+  dt <- create_proc_type_filter(dt)
+  
   # ------------------------- 
-  # CREATE SAMPLE FILTERS FIRST
+  # CREATE SAMPLE FILTERS
   # (before computing indicators, so they're available for diagnostics)
+  # [CHANGED] Now depends on proc_type_filter (created above)
   # ------------------------- 
   dt <- create_sample_filters(dt)
   
@@ -732,17 +763,17 @@ message("Exported ", export_count, " country files to: ", export_dir)
 # Optional: Access individual country results
 # -------------------------------------------------- 
 # Example usage:
-# dt_am <- results$AM$data
-# tables_tr_am <- results$AM$tables_tr
+dt_am <- results$AM$data
+tables_tr_am <- results$AM$tables_tr
 # dt_us <- results$US$data
 # tables_comp_us <- results$US$tables_comp
 
 # Using the sample restriction filters:
-# dt_us <- results$US$data
+dt_am <- results$am$data
 
 # Check how many observations are in each sample:
-# table(dt_us$filter_open)           # Count of OPEN procedures
-# table(dt_us$filter_competitive)    # Count of COMPETITIVE (OPEN + RESTRICTED)
+table(dt_am$filter_open)           # Count of OPEN procedures
+table(dt_am$filter_competitive)    # Count of COMPETITIVE (OPEN + RESTRICTED)
 
 # Filter to only OPEN procedures:
 # dt_us_open <- dt_us[filter_open == 1]
@@ -751,10 +782,10 @@ message("Exported ", export_count, " country files to: ", export_dir)
 # dt_us_competitive <- dt_us[filter_competitive == 1]
 
 # Cross-tabulation to see overlap:
-# table(dt_us$filter_open, dt_us$filter_competitive, useNA = "ifany")
+table(dt_am$filter_open, dt_am$filter_competitive, useNA = "ifany")
 
 # Analyze indicators within specific samples:
-# mean(dt_us[filter_open == 1, ind_comp_avg_bids], na.rm = TRUE)
+mean(dt_am[filter_open == 1, ind_comp_avg_bids], na.rm = TRUE)
 # mean(dt_us[filter_competitive == 1, ind_tr_bidder_id], na.rm = TRUE)
 
 # -------------------------------------------------- 
