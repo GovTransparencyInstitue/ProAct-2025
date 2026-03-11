@@ -1,39 +1,75 @@
-## ---- ProACT ---- ##
-## First time edited: 12/11/2025, by Dani
-## Last time edited: 02/06/2026, by Ivana
+## ============================================================== ##
+##       ProACT Indicator Pipeline — Script 02: Aggregation        ##
+## ============================================================== ##
 ##
-## Aggregation by: Country + Year + Product_Market + Contract_Value (HIGH/MED/LOW) + Supply_Type + Proc_Type
-## Year filter: 2000-2020
-## Handles missing price data gracefully by setting values to NA for affected tiers
+## PURPOSE:
+##   Takes the contract-level indicator files produced by Script 01
+##   and aggregates them to a summary dataset for the ProACT dashboard.
+##   One output row = one unique combination of:
+##     Country × Year × Product Market × Contract Value Tier ×
+##     Supply Type × Procedure Type
 ##
-## NEW price tiers:
-##   HIGH: >= $400,000
-##   MED:  $50,000 - $399,999
-##   LOW:  < $50,000
+## PIPELINE POSITION:
+##   Script 01 (indicators) → Script 02 (this file) → Dashboard
+##   Input:  <country>_export.csv  (from Script 01's export directory)
+##   Output: ProACT_dashboard_export.csv  +  four diagnostic CSVs
 ##
-## Supply types: WORKS, SERVICES, SUPPLIES (+ NA for missing)
+## YEAR FILTER:
+##   Only contracts from 2000–2020 are retained. Rows with unparseable
+##   dates are excluded (tender_year = NA).
 ##
-## If price data (bid_priceusd) is missing for a country, all three tiers will have NA values
-## Added: missing rate for the tier 
+## CONTRACT VALUE TIERS (fixed, USD):
+##   HIGH : bid_priceusd >= $400,000
+##   MED  : $50,000 <= bid_priceusd < $400,000
+##   LOW  : bid_priceusd < $50,000
+##   If bid_priceusd is entirely missing for a country, all three tiers
+##   will be present in the output but with NA indicator values.
+##
+## SUPPLY TYPES:
+##   Works / Services / Supplies (title-cased from source) + NA for missing
+##
+## PROCEDURE TYPES (from proc_type_filter, Script 01):
+##   OPEN / RESTRICTED / DIRECT / NA
+##
+## MISSINGNESS THRESHOLD:
+##   An indicator × cell is flagged as usable (passes_missingness_30 = 1)
+##   only if fewer than 30% of eligible contracts in that cell have a
+##   missing indicator value. Cells that fail this threshold are retained
+##   in the output but Indicator_availability_filter is set to 0.
+
+# ============================================================== #
+# 1. PACKAGES
+# ============================================================== #
+
+#   install.packages(c("optparse","tidyverse","lubridate",
+#                      "data.table","readxl"))
 
 suppressPackageStartupMessages({
-  library(optparse)
-  library(tidyverse)
-  library(lubridate)
-  library(data.table)
-  library(readxl)
+  library(optparse)   
+  library(tidyverse)   
+  library(lubridate)   
+  library(data.table)  
+  library(readxl)      
 })
 
-setDTthreads(0)  # Use all available cores
 
-# -----------------------------
-# Helpers: fail-fast file checks
-# -----------------------------
+setDTthreads(0)
+
+# ============================================================== #
+# 2. HELPER FUNCTIONS
+# ============================================================== #
+
+
 require_file <- function(path, what = "file") {
   if (!file.exists(path)) stop(sprintf("Required %s not found: %s", what, path), call. = FALSE)
 }
 
+# ============================================================== #
+# 3. UTILITY DATASETS
+# ============================================================== #
+
 # Load ISO matcher for ISO3 codes
+
 iso_matcher_path <- "/gti/tmp/ProACT/Utility_datasets/ISO_matcher.csv"
 require_file(iso_matcher_path, "ISO matcher")
 iso_matcher <- fread(iso_matcher_path) # Server PATH
@@ -52,9 +88,12 @@ ind_names_path <- "/gti/tmp/ProACT/Utility_datasets/Short_Ind_names.xlsx"
 require_file(ind_names_path, "Indicator names lookup")
 ind_names_lookup <- readxl::read_excel(ind_names_path)
 ind_names_lookup <- as.data.table(ind_names_lookup)
-setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) # Replace spaces with underscores
+setnames(ind_names_lookup, gsub(" ", "_", names(ind_names_lookup))) 
 
-# ---------- CLI ----------
+# ============================================================== #
+# 4. CLI
+# ============================================================== #
+
 opt_list <- list(
   make_option(c("--input-dir"), type="character", default="/var/tmp/ivana/Export 6"),
   make_option(c("--output-dir"), type="character", default="/var/tmp/ivana/export_dashboard ready"),
@@ -70,12 +109,17 @@ vcat <- function(...) {
   }
 }
 
-# ---------- I/O ----------
+# ============================================================== #
+# 5. OUTPUT DIRECTORY
+# ============================================================== #
 out_dir <- file.path(opt$`output-dir`, opt$`output-subdir`)
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 vcat("Output: %s", out_dir)
 
-# ---------- Indicators lists ----------
+# ============================================================== #
+# 6. INDICATOR LISTS
+# ============================================================== #
+
 list_of_indicators_new <- c(
   # Transparency
   "ind_tr_proc_type",
@@ -120,7 +164,7 @@ list_of_indicators <- list_of_indicators_new
 MISSINGNESS_THRESHOLD <- 0.30
 
 ## --------------------------------------------------
-## Eligibility lists (based on your sample restriction overview)
+## Sample restrictions
 ## --------------------------------------------------
 IND_COMPETITIVE_ONLY <- c(
   # Transparency (competitive only)
@@ -148,8 +192,7 @@ IND_OPEN_ONLY <- c(
 )
 
 ## --------------------------------------------------
-## Binary indicators (for "risky contracts" numerator)
-## - Continuous indicators (adv/dec periods, avg bids, index, etc.) should NOT have numerator counts.
+## Binary indicators 
 ## --------------------------------------------------
 IND_BINARY_RISK <- c(
   # Transparency
@@ -184,13 +227,14 @@ IND_BINARY_RISK <- c(
   "ind_comp_tax_haven_suppliers"
 )
 
+# ============================================================== #
+# 7. ELIGIBILITY MASK
+# ============================================================== #
+# This function returns a logical vector of
+# length nrow(dt) identifying which rows should be included in the
+# mean and missingness calculation for a given indicator.
 ## --------------------------------------------------
-## Eligibility mask
-## - Prefer filter_open / filter_competitive if they exist
-## - [CHANGED] Fallback now uses proc_type_filter instead of tender_proceduretype
-## - Warn ONCE (not per indicator call)
-## - IMPORTANT: ensure mask has NO NA (NA -> FALSE)
-## --------------------------------------------------
+
 .ind_filter_warned <- new.env(parent = emptyenv())
 
 indicator_eligible_mask <- function(dt, indicator) {
@@ -198,7 +242,6 @@ indicator_eligible_mask <- function(dt, indicator) {
   
   has_filters <- ("filter_open" %in% names(dt)) && ("filter_competitive" %in% names(dt))
   
-  # [CHANGED] Fallback uses proc_type_filter instead of tender_proceduretype
   proc_fallback <- function(which = c("open", "competitive")) {
     which <- match.arg(which)
     if (!("proc_type_filter" %in% names(dt))) {
@@ -213,7 +256,6 @@ indicator_eligible_mask <- function(dt, indicator) {
     out
   }
   
-  # [CHANGED] Warning message updated to reference proc_type_filter
   if (!has_filters && is.null(.ind_filter_warned$printed)) {
     warning("filter_open/filter_competitive not found in df. Falling back to proc_type_filter for eligibility (warn once).")
     .ind_filter_warned$printed <- TRUE
@@ -242,16 +284,11 @@ indicator_eligible_mask <- function(dt, indicator) {
   out
 }
 
-## --------------------------------------------------
-## ProACT Dashboard Export Function
-## - Missingness computed only within eligible sample
-## - outputs: missing_share, passes_missingness_30, n_eligible
-## - Indicator_value rounded to 2 decimals
-## - IMPORTANT FIXES:
-##   * eligibility mask cannot contain NA
-##   * numerator only computed for IND_BINARY_RISK; otherwise NA
-##   * sums involving elig always use na.rm=TRUE
-## ---------------------------------------------------
+
+# ============================================================== #
+# 8. AGGREGATION FUNCTION
+# ============================================================== #
+
 calculate_proact_aggregates <- function(dt, indicator) {
   if (!is.data.table(dt)) setDT(dt)
   
@@ -357,7 +394,10 @@ calculate_proact_aggregates <- function(dt, indicator) {
   )
 }
 
-# III. Load and process files ####
+# ============================================================== #
+# 9. LOADING DATA
+# ============================================================== #
+
 files_to_load <- list.files(opt$`input-dir`, pattern="_export\\.csv$", full.names=TRUE, recursive = TRUE)
 stopifnot(length(files_to_load) > 0)
 
@@ -384,7 +424,11 @@ price_tertiles_all    <- list()
 available_indicators_by_country <- list()
 missing_indicators_by_country   <- list()
 
-# OPTIMIZATION: Cache date parsing function results
+
+# ============================================================== #
+# 10. DATE PARSING
+# ============================================================== #
+
 parse_date_cache <- new.env(hash = TRUE, parent = emptyenv())
 
 parse_date_robust <- function(x) {
@@ -395,9 +439,8 @@ parse_date_robust <- function(x) {
   
   x_char <- as.character(x)
   
-  # Try cache first for unique values
   unique_vals <- unique(x_char[!is.na(x_char)])
-  if (length(unique_vals) < 1000) {  # Only cache if reasonable size
+  if (length(unique_vals) < 1000) {  
     result <- x_char
     for (uval in unique_vals) {
       cache_key <- uval
@@ -416,13 +459,17 @@ parse_date_robust <- function(x) {
     return(as.Date(result))
   }
   
-  # Fallback for large datasets
   parsed <- suppressWarnings(mdy(x_char))
   if (all(is.na(parsed))) parsed <- suppressWarnings(dmy(x_char))
   if (all(is.na(parsed))) parsed <- suppressWarnings(ymd(x_char))
   if (all(is.na(parsed))) parsed <- suppressWarnings(as.Date(x_char))
   parsed
 }
+
+
+# ============================================================== #
+# 11. PER-COUNTRY PROCESSING LOOP
+# ============================================================== #
 
 for (file_path in files_to_load) {
   
@@ -431,7 +478,6 @@ for (file_path in files_to_load) {
   df <- fread(file_path)
   cat(sprintf("  Loaded %d rows, %d columns\n", nrow(df), ncol(df)))
   
-  # ---- DROP DUPLICATED COLUMNS ----
   base_names <- sub("\\.\\d+$", "", names(df))
   dup_base <- base_names[duplicated(base_names)]
   if (length(dup_base) > 0) {
@@ -466,7 +512,7 @@ for (file_path in files_to_load) {
   
   cat(sprintf("  Country: %s (%s)\n", country_name, country_code))
   
-  # Create tender_year (OPTIMIZED with caching)
+  # Create tender_year 
   date_cols <- c(
     "tender_publications_firstdcontractawarddate",
     "tender_contractsignaturedate",
@@ -496,7 +542,6 @@ for (file_path in files_to_load) {
   year_success_rate <- sum(!is.na(df$tender_year)) / nrow(df) * 100
   cat(sprintf("  tender_year created: %.1f%% valid\n", year_success_rate))
   
-  # Clean up parsed columns
   parsed_cols <- paste0(date_cols, "_parsed")
   df[, (parsed_cols) := NULL]
   
@@ -516,13 +561,13 @@ for (file_path in files_to_load) {
     next
   }
   
-  # Process lot_productcode -> product_market_short_name (OPTIMIZED with "Missing" handling)
+  # ---- CPV → Product market ----
   if ("lot_productcode" %in% names(df)) {
     na_count <- sum(is.na(df$lot_productcode))
     cat(sprintf("  lot_productcode: %d non-NA (%.1f%%)\n",
                 nrow(df) - na_count, (nrow(df) - na_count)/nrow(df)*100))
     
-    # IMPORTANT: Treat "Missing" category as NA
+    # IMPORTANT: Treating "Missing" category as NA
     df[tolower(trimws(as.character(lot_productcode))) == "missing", lot_productcode := NA]
     
     lot_clean <- gsub("[^0-9]", "", as.character(df$lot_productcode))
@@ -533,7 +578,6 @@ for (file_path in files_to_load) {
     cat(sprintf("  Matchable CPV codes: %d (%.1f%%)\n",
                 matchable, matchable/nrow(df)*100))
     
-    # OPTIMIZED: Use keyed merge
     df <- merge(df,
                 correspondence_table[, .(cpv_code, product_market_short_name)],
                 by.x = "cpv_code_numeric",
@@ -551,7 +595,7 @@ for (file_path in files_to_load) {
     df[, product_market_short_name := NA_character_]
   }
   
-  # Handle tender_supplytype
+  # ---- Supply type ----
   if (!"tender_supplytype" %in% names(df)) {
     warning(sprintf("'tender_supplytype' not found in %s.", country_code))
     df[, tender_supplytype := NA_character_]
@@ -580,7 +624,7 @@ for (file_path in files_to_load) {
     }
   }
   
-  # [CHANGED] Handle proc_type_filter — ensure it is present and log distribution
+  # ---- Procedure type filter ----
   if (!"proc_type_filter" %in% names(df)) {
     warning(sprintf("'proc_type_filter' not found in %s. Creating NA column.", country_code))
     df[, proc_type_filter := NA_character_]
@@ -604,7 +648,7 @@ for (file_path in files_to_load) {
     cat("\n")
   }
   
-  # Handle bid_priceusd
+  # ---- Contract value (bid_priceusd) ----
   if (!"bid_priceusd" %in% names(df)) {
     warning(sprintf("'bid_priceusd' not found in %s.", country_code))
     df[, bid_priceusd := NA_real_]
@@ -622,7 +666,6 @@ for (file_path in files_to_load) {
                   price_available/nrow(df)*100,
                   format(round(median(df$bid_priceusd, na.rm=TRUE)), big.mark=",")))
       
-      # OPTIMIZED: Calculate tier counts once
       high_count <- sum(df$bid_priceusd >= 400000, na.rm = TRUE)
       med_count  <- sum(df$bid_priceusd >= 50000 & df$bid_priceusd < 400000, na.rm = TRUE)
       low_count  <- sum(df$bid_priceusd < 50000, na.rm = TRUE)
@@ -658,7 +701,6 @@ for (file_path in files_to_load) {
   }
   
   # DIAGNOSTICS
-  # [CHANGED] open_mask / competitive_mask fallback now uses proc_type_filter
   open_mask <- rep(FALSE, nrow(df))
   competitive_mask <- rep(FALSE, nrow(df))
   
@@ -687,7 +729,7 @@ for (file_path in files_to_load) {
     df[, contract_value_tier := NA_character_]
   }
   
-  # Diagnostics collection (unchanged)
+  # Diagnostics 
   adv_period_var <- NA_character_
   if ("ind_op_adv_period" %in% names(df)) {
     adv_period_var <- "ind_op_adv_period"
@@ -716,7 +758,7 @@ for (file_path in files_to_load) {
     )
   }
   
-  # Price tier diagnostics (unchanged logic)
+  # Price tier diagnostics 
   if (sum(!is.na(df$bid_priceusd)) > 0) {
     count_tiers <- function(dtx) {
       data.table(
@@ -836,7 +878,10 @@ for (file_path in files_to_load) {
 
 cat("\n=== All countries processed ===\n")
 
-# Export diagnostics
+# ============================================================== #
+# 12. EXPORT DIAGNOSTIC FILES
+# ============================================================== #
+
 cat("\nExporting diagnostics...\n")
 
 adv_period_diag <- rbindlist(adv_period_diag_all, fill = TRUE)
@@ -857,10 +902,17 @@ miss_dbg <- rbindlist(lapply(names(missing_indicators_by_country), function(cc) 
 ind_dbg <- rbindlist(list(avail_dbg, miss_dbg), fill = TRUE)
 fwrite(ind_dbg, file.path(out_dir, "DIAG_indicator_availability_by_country.csv"))
 
-# IV. Combine and export ####
+# ============================================================== #
+# 13. COMBINE ALL COUNTRIES
+# ============================================================== #
+
 cat("\nCombining all country tables...\n")
 proact_combined <- rbindlist(proact_export_all, fill = TRUE)
 cat(sprintf("Combined: %d rows, %d columns\n", nrow(proact_combined), ncol(proact_combined)))
+
+# ============================================================== #
+# 14. POST-PROCESSING
+# ============================================================== #
 
 cat("Matching indicator names...\n")
 proact_combined[, Indicator_original_name := Indicator]
@@ -900,7 +952,7 @@ if (length(unmatched_iso) > 0) {
 
 setnames(proact_combined, c("Country_code", "iso3"), c("Country_code_ISO_2", "Country_code_ISO_3"))
 
-# [CHANGED] Add indicator procedure scope — used by dashboard to control
+# Add indicator procedure scope — used by dashboard to control
 # whether the proc_type_filter filter is shown / restricted per indicator:
 #   "OPEN"        -> proc_type_filter filter should be disabled (indicator only valid for OPEN)
 #   "COMPETITIVE" -> filter limited to OPEN / RESTRICTED only
@@ -911,7 +963,7 @@ proact_combined[, indicator_proc_scope := fcase(
   default = "ALL"
 )]
 
-# [CHANGED] Reorder columns — proc_type_filter and indicator_proc_scope added
+# Reorder columns — proc_type_filter and indicator_proc_scope added
 setcolorder(proact_combined, c(
   "Country", "Country_code_ISO_2", "Country_code_ISO_3",
   "Indicator", "Indicator_original_name", "indicator_proc_scope",
@@ -923,7 +975,7 @@ setcolorder(proact_combined, c(
   ))
 ))
 
-# [CHANGED] Add share columns for binary indicators
+# Share columns for binary indicators
 # share_number_of_contracts: % of eligible contracts that are flagged (numerator / All_contracts)
 # share_contract_value:      % of total contract value that is flagged (risky value / total value)
 # Both are NA for continuous indicators (where Total_number_of_contracts is already NA)
@@ -949,6 +1001,10 @@ char_cols <- names(proact_combined)[sapply(proact_combined, is.character)]
 for (cc in char_cols) {
   set(proact_combined, which(proact_combined[[cc]] == "NaN"), cc, NA_character_)
 }
+
+# ============================================================== #
+# 15. EXPORT MAIN OUTPUT
+# ============================================================== #
 
 output_file <- file.path(out_dir, "ProACT_dashboard_export.csv")
 cat(sprintf("\nExporting to: %s\n", output_file))

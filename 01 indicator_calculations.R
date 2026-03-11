@@ -1,14 +1,23 @@
-## ---- ProACT Indicator Pipeline (REFACTORED) ---- ##
-## Last edited by Ivana, February 6
-## Refactored: Feb 2026 - eliminated duplication, added error handling, added sample filters
+## ============================================================== ##
+##         ProACT Dashboard Pipeline — Script 01: Indicators       ##
+## ============================================================== ##
+
+## PURPOSE:
+##   This script calculates indicators at the contract level and exports one file per country. The exported
+##   files are then used as input for the aggregation pipeline (Script 02).
+##
+## PIPELINE OVERVIEW:
+##   Script 01 (this file) → Script 02 (aggregation)
+##   Input:  <country>_export.csv  (one file per country, raw data)
+##   Output: <country>_export.csv  (one file per country, with indicators)
 
 # -------------------------------------------------- 
 # Configuration
 # -------------------------------------------------- 
-data_dir <- Sys.getenv("PROACT_DATA_DIR", "/var/tmp/ivana") #change with location of input data 
-export_dir <- Sys.getenv("PROACT_EXPORT_DIR", "/var/tmp/ivana/Export 6") #change with location to save export with calculated indicators
+data_dir <- Sys.getenv("PROACT_DATA_DIR", "/var/tmp/ivana") #location of input data 
+export_dir <- Sys.getenv("PROACT_EXPORT_DIR", "/var/tmp/ivana/Export 6") #location to save export with calculated indicators (to be used as input folder for the pipeline 02)
 
-# Risk scores
+# Risk scores for already calculated risks
 RISK_NONE <- 100L
 RISK_MEDIUM <- 50L
 RISK_HIGH <- 0L
@@ -16,6 +25,11 @@ RISK_HIGH <- 0L
 # -------------------------------------------------- 
 # Packages
 # -------------------------------------------------- 
+
+# Install any missing packages with:
+#   install.packages(c("data.table","dplyr","stringr","purrr",
+#                      "tidyr","readr","janitor"))
+
 library(data.table)
 library(dplyr)
 library(stringr)
@@ -27,6 +41,8 @@ library(janitor)
 # -------------------------------------------------- 
 # Indicators
 # -------------------------------------------------- 
+
+#Transparency
 TR_INDICATOR_VARS <- c(
   "ind_tr_proc_type",
   "ind_tr_buyer_id",
@@ -46,17 +62,20 @@ TR_INDICATOR_VARS <- c(
 
 IND_TR_VARS <- c(TR_INDICATOR_VARS, "ind_tr_index", "ind_tr_benford")
 
+#Openness
 IND_OP_VARS <- c(
   "ind_op_adv_period",
   "ind_op_short_adv_flag",
   "ind_op_lots_usage"
 )
 
+#Administrative efficiency
 IND_ADM_VARS <- c(
   "ind_adm_dec_period",
   "ind_adm_long_dec_flag"
 )
 
+#Competition
 IND_COMP_VARS <- c(
   "ind_comp_avg_bids",
   "ind_comp_single_bid",
@@ -93,11 +112,9 @@ tabulate_vars <- function(vars, dt) {
 # Data Loading
 # -------------------------------------------------- 
 
-#' Loading country data
-#' 
-#' @param country_code Two-letter country code (e.g., "AM", "US")
-#' @param data_dir Directory containing country export files
-#' @return data.table of procurement records, or NULL if file not found/error
+# Loading country data
+# each dataset is named starting with two-letter country code (e.g., "AM", "US")
+# this loads all country export files from data_dir folder
 
 country_data <- function(country_code, data_dir) {
   file_path <- file.path(data_dir, paste0(country_code, "_export.csv"))
@@ -123,20 +140,15 @@ country_data <- function(country_code, data_dir) {
 }
 
 # --------------------------------------------------
-# [CHANGED] Procedure Type Filter
-# NEW function: maps ind_corr_nonopen_proc_method -> proc_type_filter
+# Procedure Type Filter
 # --------------------------------------------------
 
-#' Create proc_type_filter from ind_corr_nonopen_proc_method
-#'
-#' @param dt data.table of procurement records
-#' @return data.table with added proc_type_filter column
-#' @details
-#' Maps ind_corr_nonopen_proc_method risk scores to procedure type labels:
-#'   100 -> "OPEN"
-#'   50  -> "RESTRICTED"
-#'   0   -> "DIRECT"
-#'   NA / other -> NA_character_
+# Create proc_type_filter from ind_corr_nonopen_proc_method. This variable is used for sample restrictions.
+# Maps ind_corr_nonopen_proc_method risk scores to procedure type labels:
+#   100 -> "OPEN"
+#   50  -> "RESTRICTED"
+#   0   -> "DIRECT"
+#   NA / other -> NA_character_
 
 create_proc_type_filter <- function(dt) {
   setDT(dt)
@@ -156,30 +168,22 @@ create_proc_type_filter <- function(dt) {
 }
 
 # -------------------------------------------------- 
-# Sample Restriction Filters
+# Sample Restriction 
 # -------------------------------------------------- 
 
-#' Create sample restriction filter variables
-#' 
-#' @param dt data.table of procurement records
-#' @return data.table with added filter columns
-#' @details
-#' Creates binary (0/1) filter variables to track sample restrictions:
-#' - filter_open: 1 if procedure is OPEN, 0 otherwise
-#' - filter_competitive: 1 if procedure is OPEN or RESTRICTED, 0 otherwise
-#' These filters show which observations are eligible for sample-restricted indicators
-# [CHANGED] Now based on proc_type_filter instead of tender_proceduretype
+# Create sample restriction filter variables
+# Creates binary (0/1) filter variables to track sample restrictions:
+# - filter_open: 1 if procedure is OPEN, 0 otherwise
+# - filter_competitive: 1 if procedure is OPEN or RESTRICTED, 0 otherwise
 
 create_sample_filters <- function(dt) {
   setDT(dt)
   
-  # Initialize filters as 0 (not in sample)
   dt[, `:=`(
     filter_open = 0L,
     filter_competitive = 0L
   )]
   
-  # [CHANGED] Use proc_type_filter instead of tender_proceduretype
   if ("proc_type_filter" %in% names(dt)) {
     dt[proc_type_filter == "OPEN",                        filter_open        := 1L]
     dt[proc_type_filter %in% c("OPEN", "RESTRICTED"),     filter_competitive := 1L]
@@ -192,18 +196,14 @@ create_sample_filters <- function(dt) {
 # 1. Transparency Indicators
 # -------------------------------------------------- 
 
-#' Calculating transparency indicators for procurement data
-#' 
-#' @param dt data.table of procurement records
-#' @return data.table with added transparency indicator columns
-#' @details 
-#' - Most indicators apply to ALL rows (all awarded contracts)
-#' - Competitive-only indicators: bidder_id, bidder_loc, call_pub, bid_deadline, bid_opening
-#' - Supplier_id is ALL rows (based on bidder_id)
-#' - Supplier_loc is ALL rows (based on bidder_city OR bidder_nuts)
-#' - Bidder_loc is COMPETITIVE ONLY (based on bidder_city OR bidder_nuts)
-#' - Transparency index includes ALL indicators except Benford
-#' - Index is row-mean over available indicators (skip NAs)
+# Calculating transparency indicators
+# - Most indicators apply to ALL rows (all awarded contracts)
+# - Competitive-only indicators: bidder_id, bidder_loc, call_pub, bid_deadline, bid_opening
+# - Supplier_id is ALL rows (based on bidder_id)
+# - Supplier_loc is ALL rows (based on bidder_city OR bidder_nuts)
+# - Bidder_loc is COMPETITIVE ONLY (based on bidder_city OR bidder_nuts)
+# - Transparency index includes ALL indicators except Benford
+# - Index is row-mean over available indicators (skip NAs)
 
 calc_transparency_indicators <- function(dt) {
   setDT(dt)
@@ -232,8 +232,6 @@ calc_transparency_indicators <- function(dt) {
   # ------------------------- 
   # 1) ALL rows indicators
   # ------------------------- 
-  # NOTE: ind_tr_proc_type stays on tender_proceduretype — it is a data completeness
-  # check (was procedure type reported?), not a sample restriction
   if ("tender_proceduretype" %in% names(dt)) {
     dt[, ind_tr_proc_type := present01(tender_proceduretype)]
   }
@@ -286,7 +284,6 @@ calc_transparency_indicators <- function(dt) {
   # ------------------------- 
   # 2) COMPETITIVE ONLY (OPEN/RESTRICTED)
   # ------------------------- 
-  # [CHANGED] competitive mask now uses proc_type_filter instead of tender_proceduretype
   if ("proc_type_filter" %in% names(dt)) {
     dt[, competitive := !is.na(proc_type_filter) & proc_type_filter %in% c("OPEN", "RESTRICTED")]
     
@@ -326,7 +323,6 @@ calc_transparency_indicators <- function(dt) {
       dt[competitive == TRUE, ind_tr_bid_opening := 0L]
     }
     
-    # Clean up temporary columns
     dt[, competitive := NULL]
   }
   
@@ -358,14 +354,10 @@ calc_transparency_indicators <- function(dt) {
 # 2. Openness Indicators
 # -------------------------------------------------- 
 
-#' Calculate openness indicators
-#' 
-#' @param dt data.table of procurement records
-#' @return data.table with added openness indicator columns
-#' @details
-#' 1) ind_op_adv_period (days) - advertisement period (competitive only)
-#' 2) ind_op_short_adv_flag (0/1) - short advertisement period flag (competitive only)
-#' 3) ind_op_lots_usage (0/1) - tender has multiple lots (competitive only)
+# Calculate openness indicators
+# 1) ind_op_adv_period (days) - advertisement period (competitive only)
+# 2) ind_op_short_adv_flag (0/1) - short advertisement period flag (competitive only)
+# 3) ind_op_lots_usage (0/1) - tender has multiple lots (competitive only)
 
 
 calc_openness_indicators <- function(dt) {
@@ -382,7 +374,6 @@ calc_openness_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Competitive mask (OPEN or RESTRICTED procedures)
-  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, competitive := FALSE]
   if ("proc_type_filter" %in% names(dt)) {
@@ -408,7 +399,6 @@ calc_openness_indicators <- function(dt) {
       as.integer(n_lots > 1)
     )]
     
-    # Assign tender-level value back to all rows
     dt[competitive == TRUE, ind_op_lots_usage := tmp[.SD, on = .(tender_id), x.ind_op_lots_usage]]
   }
   
@@ -421,7 +411,7 @@ calc_openness_indicators <- function(dt) {
   
   # ------------------------- 
   # 4) Short advertisement period flag (competitive only)
-  # Source: ind_corr_subm_period (100 = not short, 50/0 = short)
+  # Source: ind_corr_subm_period 
   # ------------------------- 
   if ("ind_corr_subm_period" %in% names(dt)) {
     dt[competitive == TRUE, ind_op_short_adv_flag := fifelse(
@@ -431,7 +421,6 @@ calc_openness_indicators <- function(dt) {
     )]
   }
   
-  # Clean up
   dt[, competitive := NULL]
   
   return(dt)
@@ -441,13 +430,9 @@ calc_openness_indicators <- function(dt) {
 # 3. Administrative Efficiency Indicators
 # -------------------------------------------------- 
 
-#' Calculate administrative efficiency indicators
-#' 
-#' @param dt data.table of procurement records
-#' @return data.table with added admin efficiency indicator columns
-#' @details
-#' 1) ind_adm_dec_period (days) - decision period (competitive only)
-#' 2) ind_adm_long_dec_flag (0/1) - long decision period flag (competitive only)
+# Calculate administrative efficiency indicators
+# 1) ind_adm_dec_period (days) - decision period (competitive only)
+# 2) ind_adm_long_dec_flag (0/1) - long decision period flag (competitive only)
 
 
 calc_admin_efficiency_indicators <- function(dt) {
@@ -463,7 +448,6 @@ calc_admin_efficiency_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Competitive mask (OPEN or RESTRICTED)
-  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, competitive := FALSE]
   if ("proc_type_filter" %in% names(dt)) {
@@ -479,7 +463,7 @@ calc_admin_efficiency_indicators <- function(dt) {
   
   # ------------------------- 
   # 3) Long decision period flag (competitive only)
-  # Source: ind_corr_dec_period (100 = not long, 50/0 = long)
+  # Source: ind_corr_dec_period
   # ------------------------- 
   if ("ind_corr_dec_period" %in% names(dt)) {
     dt[competitive == TRUE, ind_adm_long_dec_flag := fifelse(
@@ -489,7 +473,6 @@ calc_admin_efficiency_indicators <- function(dt) {
     )]
   }
   
-  # Clean up
   dt[, competitive := NULL]
   
   return(dt)
@@ -499,17 +482,13 @@ calc_admin_efficiency_indicators <- function(dt) {
 # 4. Competition Indicators
 # -------------------------------------------------- 
 
-#' Calculate competition indicators
-#' 
-#' @param dt data.table of procurement records
-#' @return data.table with added competition indicator columns
-#' @details
-#' 1) ind_comp_avg_bids - average number of bids (OPEN only)
-#' 2) ind_comp_good_comp - good competition level: 6+ bids (OPEN only)
-#' 3) ind_comp_single_bid - single bidding flag (OPEN only)
-#' 4) ind_comp_bidder_non_l - non-local supplier (ALL rows)
-#' 5) ind_comp_foreign_suppliers - foreign supplier (ALL rows)
-#' 6) ind_comp_tax_haven_suppliers - tax haven supplier (ALL rows)
+# Calculate competition indicators
+# 1) ind_comp_avg_bids - average number of bids (OPEN only)
+# 2) ind_comp_good_comp - good competition level: 6+ bids (OPEN only)
+# 3) ind_comp_single_bid - single bidding flag (OPEN only)
+# 4) ind_comp_bidder_non_l - non-local supplier (ALL rows)
+# 5) ind_comp_foreign_suppliers - foreign supplier (ALL rows)
+# 6) ind_comp_tax_haven_suppliers - tax haven supplier (ALL rows)
 
 
 calc_competition_indicators <- function(dt) {
@@ -531,7 +510,6 @@ calc_competition_indicators <- function(dt) {
   
   # ------------------------- 
   # 1) Eligibility mask: OPEN only (for bid-related indicators)
-  # [CHANGED] Uses proc_type_filter instead of tender_proceduretype
   # ------------------------- 
   dt[, eligible_open := FALSE]
   if ("proc_type_filter" %in% names(dt)) {
@@ -539,7 +517,7 @@ calc_competition_indicators <- function(dt) {
   }
   
   # ------------------------- 
-  # 2) Determine bid count column
+  # 2) bid count column
   # ------------------------- 
   bids_col <- NA_character_
   if ("ind_comp_bids_count" %in% names(dt)) {
@@ -573,7 +551,7 @@ calc_competition_indicators <- function(dt) {
   
   # ------------------------- 
   # 5) Single bidding (OPEN only)
-  # Source: ind_corr_singleb (0 = single bid, 100 = multiple bids)
+  # Source: ind_corr_singleb 
   # ------------------------- 
   if ("ind_corr_singleb" %in% names(dt)) {
     dt[eligible_open == TRUE, ind_comp_single_bid := fifelse(
@@ -606,7 +584,6 @@ calc_competition_indicators <- function(dt) {
   
   # ------------------------- 
   # 7) Non-local supplier (ALL rows)
-  # Source: ind_comp_bidder_non_local (100 = non-local, 0 = local)
   # ------------------------- 
   if ("ind_comp_bidder_non_local" %in% names(dt)) {
     dt[, ind_comp_bidder_non_l := fifelse(
@@ -619,7 +596,7 @@ calc_competition_indicators <- function(dt) {
   
   # ------------------------- 
   # 8) Tax haven supplier (ALL rows)
-  # Source: ind_corr_taxhaven (0 = tax haven, 100 = not tax haven)
+  # Source: ind_corr_taxhaven 
   # ------------------------- 
   if ("ind_corr_taxhaven" %in% names(dt)) {
     dt[, ind_comp_tax_haven_suppliers := fifelse(
@@ -630,7 +607,6 @@ calc_competition_indicators <- function(dt) {
     )]
   }
   
-  # Clean up
   dt[, eligible_open := NULL]
   
   return(dt)
@@ -640,11 +616,7 @@ calc_competition_indicators <- function(dt) {
 # Main Processing Function
 # -------------------------------------------------- 
 
-#' Process a single country: load data and calculate all indicators
-#' 
-#' @param cc Two-letter country code
-#' @param data_dir Directory containing source data files
-#' @return List with processed data and diagnostic tables, or NULL on error
+# Process a single country: load data and calculate all indicators
 
 run_country <- function(cc, data_dir) {
   message("Processing country: ", cc)
@@ -668,15 +640,13 @@ run_country <- function(cc, data_dir) {
   }
   
   # -------------------------
-  # [CHANGED] CREATE PROC TYPE FILTER FIRST
-  # New step: derive proc_type_filter from ind_corr_nonopen_proc_method
+  # CREATE PROC TYPE FILTER FIRST
   # -------------------------
   dt <- create_proc_type_filter(dt)
   
   # ------------------------- 
   # CREATE SAMPLE FILTERS
   # (before computing indicators, so they're available for diagnostics)
-  # [CHANGED] Now depends on proc_type_filter (created above)
   # ------------------------- 
   dt <- create_sample_filters(dt)
   
@@ -701,7 +671,7 @@ run_country <- function(cc, data_dir) {
 }
 
 # -------------------------------------------------- 
-# Execute Pipeline for All Countries
+# Run pipeline for all countries
 # -------------------------------------------------- 
 
 # Country list
@@ -760,45 +730,17 @@ message("=== Pipeline Complete ===")
 message("Exported ", export_count, " country files to: ", export_dir)
 
 # -------------------------------------------------- 
-# Optional: Access individual country results
+# Country level results/diagnostics
 # -------------------------------------------------- 
-# Example usage:
-dt_am <- results$AM$data
-tables_tr_am <- results$AM$tables_tr
-# dt_us <- results$US$data
-# tables_comp_us <- results$US$tables_comp
+# Example:
+#dt_am <- results$AM$data #data frame for Armenia
+#tables_tr_am <- results$AM$tables_tr #overview of transparency indicators for armenia
 
 # Using the sample restriction filters:
-dt_am <- results$am$data
-
-# Check how many observations are in each sample:
-table(dt_am$filter_open)           # Count of OPEN procedures
-table(dt_am$filter_competitive)    # Count of COMPETITIVE (OPEN + RESTRICTED)
-
-# Filter to only OPEN procedures:
-# dt_us_open <- dt_us[filter_open == 1]
-
-# Filter to only COMPETITIVE procedures:
-# dt_us_competitive <- dt_us[filter_competitive == 1]
-
-# Cross-tabulation to see overlap:
-table(dt_am$filter_open, dt_am$filter_competitive, useNA = "ifany")
+#table(dt_am$filter_open)           # Count of observations in OPEN procedures
+#table(dt_am$filter_competitive)    # Count of observations in COMPETITIVE (OPEN + RESTRICTED) procedures
 
 # Analyze indicators within specific samples:
-mean(dt_am[filter_open == 1, ind_comp_avg_bids], na.rm = TRUE)
-# mean(dt_us[filter_competitive == 1, ind_tr_bidder_id], na.rm = TRUE)
-
-# -------------------------------------------------- 
-# Optional: Access individual country results
-# -------------------------------------------------- 
-# Example usage:
-dt_am <- results$AM$data
-tables_tr_am <- results$AM$tables_tr
-tables_comp_am <- results$AM$tables_comp
-
-tables_tr_at <- results$AT$tables_tr
-tables_comp_at <- results$AT$tables_comp
+#mean(dt_am[filter_open == 1, ind_comp_avg_bids], na.rm = TRUE) #mean value of indicator within open procedures filter
 
 
-# dt_us <- results$US$data
-# tables_comp_us <- results$US$tables_comp
